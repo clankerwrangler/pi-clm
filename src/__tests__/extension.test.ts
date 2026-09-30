@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,6 +30,7 @@ type Harness = {
 	/** `pi.sendUserMessage` calls. */
 	sentUserMessages: Array<{ content: unknown; options?: unknown }>;
 	ctx: any;
+	lastContext?: any;
 	setUsage(percent: number | undefined): void;
 };
 
@@ -94,7 +95,7 @@ function createHarness(initialBranch: any[] = []): Harness {
 		},
 		sessionManager: {
 			getSessionId: () => "extension-test-session",
-			getSessionFile: () => "/tmp/extension-test-session.jsonl",
+			getSessionFile: () => undefined,
 			getBranch: () => [...branch],
 			getEntries: () => [...branch],
 			getEntry: (id: string) => branch.find((entry) => entry.id === id),
@@ -127,11 +128,37 @@ function createHarness(initialBranch: any[] = []): Harness {
 }
 
 async function emit(harness: Harness, name: string, event: any): Promise<any[]> {
+	if (name === "context") {
+		harness.lastContext = event;
+		// Model the stock session's source entries; callers can opt out for unmapped tests.
+		if (event.persistSources !== false) {
+			for (const message of event.messages) {
+				if (!harness.branch.some((entry) => entry.type === "message" && JSON.stringify(entry.message) === JSON.stringify(message))) {
+					harness.branch.push({ type: "message", id: `message-${harness.branch.length}`, message });
+				}
+			}
+		}
+	}
+	if (name === "before_agent_start") event.systemPromptOptions = {
+		sections: {}, ...event.systemPromptOptions,
+	};
 	const results: any[] = [];
-	for (const handler of harness.handlers.get(name) ?? []) {
-		results.push(await handler(event, harness.ctx));
+	for (const handler of harness.handlers.get(name) ?? []) results.push(await handler(event, harness.ctx));
+	if (name === "before_agent_start" && event.systemPromptOptions.sections.editable_context) {
+		// Render the structured addition for tests that discover the advertised path.
+		results[0] = { systemPrompt: `${event.systemPrompt}\n${event.systemPromptOptions.sections.editable_context}` };
 	}
 	return results;
+}
+
+async function nextRequest(harness: Harness): Promise<any[]> {
+	return emit(harness, "context", harness.lastContext);
+}
+
+async function submit(path: string, text: string, _encoding = "utf8"): Promise<void> {
+	const draft = `${path}.draft`;
+	await writeFile(draft, text, "utf8");
+	await rename(draft, path.replace(/\.md$/, ".commit.md"));
 }
 
 function rawConversation(): LiveContextMessage[] {
@@ -178,9 +205,10 @@ describe("live-context extension lifecycle", () => {
 		const firstContext = await emit(harness, "context", { type: "context", messages: raw });
 		assert.deepEqual(firstContext[0].messages, raw);
 		const mirror = await readFile(mirrorPath, "utf8");
-		await writeFile(mirrorPath, compactSecondTurn(mirror), "utf8");
+		await submit(mirrorPath, compactSecondTurn(mirror), "utf8");
 
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		const acceptedContext = await nextRequest(harness);
+		assert.equal(acceptedContext[0].messages.at(-1)?.customType, "live-context-notice");
 		const persisted = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1);
 		assert.equal(persisted.data.lastOutcome.kind, "applied");
 		assert.equal(persisted.data.revision, 1);
@@ -202,11 +230,11 @@ describe("live-context extension lifecycle", () => {
 			messages: [...raw, suffix],
 		});
 		const visible = secondContext[0].messages as LiveContextMessage[];
-		assert.equal(visible[0], raw[0]);
+		assert.deepEqual(visible[0], raw[0]);
 		assert.match(JSON.stringify(visible[1].content), /parser\.ts is the only relevant file/);
 		assert.doesNotMatch(JSON.stringify(visible), /large output/);
 		assert.equal(visible[2], suffix);
-		assert.equal(visible.at(-1)?.customType, "live-context-notice");
+		assert.equal(visible.at(-1), suffix);
 
 		// The raw event input remains untouched and auditable.
 		assert.match(JSON.stringify(raw), /large output/);
@@ -243,8 +271,8 @@ describe("live-context extension lifecycle", () => {
 		const mirror = await readFile(mirrorPath, "utf8");
 		const edited = mirror.replace(/(\[\[CTX_TURN[^\n]*index=2[^\n]*\]\]\n)abcd/, "$1a");
 		assert.notEqual(edited, mirror);
-		await writeFile(mirrorPath, edited, "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, edited, "utf8");
+		await nextRequest(harness);
 
 		const latest = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1);
 		assert.equal(latest.data.lastOutcome.kind, "rejected");
@@ -268,8 +296,8 @@ describe("live-context extension lifecycle", () => {
 			systemPromptOptions: {},
 		});
 		const mirrorPath = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
-		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+		await nextRequest(harness);
 
 		const changedRaw = rawConversation();
 		changedRaw[1] = { ...changedRaw[1], content: "externally changed raw history" };
@@ -385,8 +413,8 @@ describe("live-context extension lifecycle", () => {
 			systemPromptOptions: {},
 		});
 		const mirrorPath = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
-		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+		await nextRequest(harness);
 
 		const command = harness.commands.get("live-context");
 		await command.handler("reset", harness.ctx);
@@ -447,8 +475,8 @@ describe("live-context extension lifecycle", () => {
 			systemPromptOptions: {},
 		});
 		const mirrorPath = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
-		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+		await nextRequest(harness);
 
 		const suffix: LiveContextMessage = {
 			role: "assistant",
@@ -458,8 +486,8 @@ describe("live-context extension lifecycle", () => {
 		};
 		await emit(harness, "context", { type: "context", messages: [...raw, suffix] });
 		const grown = `${await readFile(mirrorPath, "utf8")}\nAppended detail that grows the projection.`;
-		await writeFile(mirrorPath, grown, "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, grown, "utf8");
+		await nextRequest(harness);
 
 		const latest = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1);
 		assert.equal(latest.data.lastOutcome.kind, "rejected");
@@ -505,7 +533,7 @@ describe("live-context extension lifecycle", () => {
 		await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
 	});
 
-	test("consecutive invalidations raise one composition warning", async () => {
+	test("a revision used by a request interrupts consecutive invalidations", async () => {
 		const harness = createHarness();
 		liveContextExtension(harness.pi);
 		await emit(harness, "session_start", { type: "session_start", reason: "startup" });
@@ -527,8 +555,8 @@ describe("live-context extension lifecycle", () => {
 		}
 		async function acceptEdit(messages: LiveContextMessage[]): Promise<void> {
 			await emit(harness, "context", { type: "context", messages });
-			await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
-			await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+			await submit(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+			await nextRequest(harness);
 		}
 		const warnings = () => harness.notifications.filter((n) => /consecutive projections were invalidated/.test(n));
 
@@ -536,7 +564,7 @@ describe("live-context extension lifecycle", () => {
 		await acceptEdit(variantConversation("b"));
 		assert.equal(warnings().length, 0);
 		await acceptEdit(variantConversation("c"));
-		assert.equal(warnings().length, 1);
+		assert.equal(warnings().length, 0);
 		await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
 	});
 
@@ -552,12 +580,12 @@ describe("live-context extension lifecycle", () => {
 		});
 		const mirrorPath = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
 		await emit(harness, "context", { type: "context", messages: rawConversation() });
-		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+		await nextRequest(harness);
 		assert.doesNotMatch(harness.statuses.get("live-context") ?? "", /obs/);
 
 		harness.setUsage(31);
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await emit(harness, "turn_end", {});
 		assert.match(harness.statuses.get("live-context") ?? "", /obs 31\.0k tok/);
 
 		const command = harness.commands.get("live-context");
@@ -608,8 +636,8 @@ describe("live-context extension lifecycle", () => {
 			systemPromptOptions: {},
 		});
 		const mirrorPath = String(prompt[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
-		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+		await nextRequest(harness);
 		const checkpointEntry = harness.branch.at(-1);
 
 		// A branch whose selected head predates the checkpoint uses raw Pi context.
@@ -640,8 +668,8 @@ describe("live-context extension lifecycle", () => {
 			systemPromptOptions: {},
 		});
 		const mirrorPath = String(prompt[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
-		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+		await nextRequest(harness);
 		assert.ok(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1).data.checkpoint);
 
 		await emit(harness, "session_compact", { type: "session_compact", reason: "threshold" });
@@ -826,8 +854,8 @@ describe("live-context extension lifecycle", () => {
 			/(\[\[CTX_TURN [^\n]* index=4 [^\n]*\]\]\n)[\s\S]*?(?=\n\n\[\[CTX_TURN )/,
 			"$1Investigation complete; implementation remains deferred.",
 		);
-		await writeFile(mirrorPath, edited, "utf8");
-		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await submit(mirrorPath, edited, "utf8");
+		await nextRequest(harness);
 
 		const projected = await emit(harness, "context", { type: "context", messages: raw });
 		const projectedMessages = projected[0].messages as LiveContextMessage[];
@@ -880,13 +908,13 @@ describe("pi-clm entry point", () => {
 			const raw = rawConversation();
 			await emit(harness, "context", { messages: raw });
 			const original = await readFile(path, "utf8");
-			await writeFile(path, original.replace("Solve the task", "not committed"));
+			await submit(path, original.replace("Solve the task", "not committed"));
 			harness.pi.appendEntry = () => { throw new Error("simulated disk error"); };
 			await emit(harness, "turn_end", {});
 			const next = await emit(harness, "context", { messages: raw });
 			assert.equal(next[0].messages[0].content, "Solve the task");
 			assert.match(JSON.stringify(next[0].messages), /persistence failed/);
-			assert.equal(harness.branch.length, 0);
+			assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, 0);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
@@ -901,13 +929,16 @@ describe("pi-clm entry point", () => {
 			await emit(harness, "context", { messages: raw });
 			const candidate = (await readFile(path, "utf8")).replace("Solve the task", "old branch draft");
 			let finish!: (value: string) => void;
-			const read = t.mock.method(MirrorStore.prototype, "read", () => new Promise<string>(resolve => { finish = resolve; }));
-			const pending = emit(harness, "turn_end", {});
+			let entered!: () => void;
+			const started = new Promise<void>((resolve) => { entered = resolve; });
+			const read = t.mock.method(MirrorStore.prototype, "readSubmission", () => new Promise<string>(resolve => { finish = resolve; entered(); }));
+			const pending = nextRequest(harness);
+			await started;
 			await emit(harness, "session_tree", {});
 			finish(candidate);
 			await pending;
 			read.mock.restore();
-			assert.equal(harness.branch.length, 0);
+			assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, 0);
 			const next = await emit(harness, "context", { messages: raw });
 			assert.equal(next[0].messages[0].content, "Solve the task");
 		} finally { await emit(harness, "session_shutdown", {}); }
@@ -933,8 +964,8 @@ describe("pi-clm entry point", () => {
 				const calls = await emit(harness, "tool_call", { toolName: "write", input: { path, content: "candidate" } });
 				assert.ok(calls.every(result => !result?.block));
 			}
-			await writeFile(path, original.replace("Solve the task", "expanded task ".repeat(100)));
-			await emit(harness, "turn_end", {});
+			await submit(path, original.replace("Solve the task", "expanded task ".repeat(100)));
+			await nextRequest(harness);
 			assert.equal(harness.branch.at(-1)?.data.lastOutcome.kind, "applied");
 			const projected = await emit(harness, "context", { messages: raw });
 			assert.equal(projected[0].messages[0].content, "expanded task ".repeat(100).trim());
@@ -985,7 +1016,7 @@ describe("pi-clm entry point", () => {
 
 			// Compaction edit accepted: the old observation must not re-trigger the reminder.
 			const document = await readFile(path, "utf8");
-			await writeFile(path, document.replace("x".repeat(40), "compacted"));
+			await submit(path, document.replace("x".repeat(40), "compacted"));
 			await emit(harness, "turn_end", {});
 			const after = await emit(harness, "context", { messages: raw });
 			assert.equal(after[0].messages.some((m: any) => typeof m.content === "string" && m.content.startsWith("[CLM BUDGET]")), false);
@@ -1022,7 +1053,7 @@ describe("pi-clm entry point", () => {
 			const path = before[0].systemPrompt.match(/mirrored at `([^`]+)`/)[1];
 			assert.equal(budgetNotices(await emit(harness, "context", { messages: raw })).length, 1, "600-token observation crosses 50% of 1000");
 			const text = await readFile(path, "utf8");
-			await writeFile(path, text.replace(/(\[\[CTX_TURN[^\n]+index=2[^\n]+\]\]\n)[\s\S]*$/, "$1tiny"));
+			await submit(path, text.replace(/(\[\[CTX_TURN[^\n]+index=2[^\n]+\]\]\n)[\s\S]*$/, "$1tiny"));
 			await emit(harness, "turn_end", {});
 			assert.equal(budgetNotices(await emit(harness, "context", { messages: raw })).length, 0, "same runtime: stale observation ignored");
 
@@ -1601,4 +1632,192 @@ describe("pi-clm entry point", () => {
 			assert.equal((await emit(harness, "before_provider_request", { payload: { max_tokens: 1 } }))[0], undefined);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
+});
+
+
+describe("async file submissions and independent safety", () => {
+	async function started() {
+		const harness = createHarness();
+		clmExtension(harness.pi);
+		await emit(harness, "session_start", {});
+		const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+		const path = before[0].systemPrompt.match(/mirrored at `([^`]+)`/)[1] as string;
+		return { harness, path };
+	}
+
+	test("late completed draft survives intervening requests and conserves pending native suffix", async () => {
+		const { harness, path } = await started();
+		try {
+			const raw = rawConversation();
+			await emit(harness, "context", { messages: raw });
+			const draft = compactSecondTurn(await readFile(path, "utf8"));
+			const pending = { role: "assistant", content: [{ type: "toolCall", id: "pending", name: "worker", arguments: {} }], timestamp: 3 };
+			const suffix = [pending, { role: "user", content: "unrelated suffix", timestamp: 4 }];
+			await emit(harness, "context", { messages: [...raw, ...suffix] });
+			await emit(harness, "turn_end", {});
+			assert.equal(harness.branch.some((entry) => entry.customType === LIVE_CONTEXT_STATE), false);
+			await submit(path, draft);
+			const next = await nextRequest(harness);
+			assert.match(JSON.stringify(next[0].messages), /parser.ts is the only relevant file/);
+			assert.deepEqual(next[0].messages.slice(2, 4), suffix);
+			const result = { role: "toolResult", toolCallId: "pending", toolName: "worker", content: [{ type: "text", text: "done" }], timestamp: 5 };
+			const completed = await emit(harness, "context", { messages: [...raw, ...suffix, result] });
+			assert.deepEqual(completed[0].messages.slice(2, 5), [...suffix, result]);
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+
+	test("snapshot source is frozen before asynchronous mirror publication", async (t) => {
+		const { harness, path } = await started();
+		let release!: () => void;
+		let began!: () => void;
+		const writing = new Promise<void>((resolve) => { began = resolve; });
+		const hold = new Promise<void>((resolve) => { release = resolve; });
+		const original = MirrorStore.prototype.write;
+		let first = true;
+		const paused = t.mock.method(MirrorStore.prototype, "write", async function (this: MirrorStore, text: string) {
+			if (first) { first = false; began(); await hold; }
+			return original.call(this, text);
+		});
+		try {
+			const raw = rawConversation();
+			const rendering = emit(harness, "context", { messages: raw });
+			await writing;
+			const suffix = { role: "user", content: "arrived during file publication", timestamp: 4 };
+			raw.push(suffix);
+			release();
+			await rendering;
+			await submit(path, compactSecondTurn(await readFile(path, "utf8")));
+			const result = await nextRequest(harness);
+			assert.match(JSON.stringify(result[0].messages), /parser.ts is the only relevant file/);
+			assert.deepEqual(result[0].messages[2], suffix);
+		} finally { release(); paused.mock.restore(); await emit(harness, "session_shutdown", {}); }
+	});
+
+	test("unsubmitted partial writes never apply, even at turn_end", async () => {
+		const { harness, path } = await started();
+		try {
+			await emit(harness, "context", { messages: rawConversation() });
+			await writeFile(path, "partially written document", "utf8");
+			await writeFile(`${path}.draft`, "partial draft", "utf8");
+			await emit(harness, "turn_end", {});
+			const next = await nextRequest(harness);
+			assert.match(JSON.stringify(next[0].messages), /large output/);
+			assert.equal(harness.branch.some((entry) => entry.customType === LIVE_CONTEXT_STATE), false);
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+
+	for (const conflict of ["accepted edit", "prefix", "model", "expiry", "branch", "off"] as const) {
+		test(`rejects a completed submission after ${conflict}`, async () => {
+			const { harness, path } = await started();
+			try {
+				const raw = rawConversation();
+				await emit(harness, "context", { messages: raw });
+				const draft = compactSecondTurn(await readFile(path, "utf8"));
+				if (conflict === "accepted edit") {
+					await submit(path, draft.replace("parser.ts", "newer.ts"));
+					await nextRequest(harness);
+				} else if (conflict === "prefix") {
+					raw[0] = { ...raw[0], content: "changed source" };
+				} else if (conflict === "model") harness.ctx.model = { provider: "new", id: "model", api: "test" };
+				else if (conflict === "expiry") for (let i = 0; i < 16; i++) await nextRequest(harness);
+				else if (conflict === "branch") await emit(harness, "session_tree", {});
+				else await harness.commands.get("clm").handler("off", harness.ctx);
+				await submit(path, draft);
+				const count = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length;
+				const next = await emit(harness, "context", { messages: raw });
+				assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, count);
+				if (conflict !== "off") assert.match(JSON.stringify(next[0].messages), /expired or conflicting snapshot/);
+				if (conflict === "accepted edit") assert.match(JSON.stringify(next[0].messages), /newer.ts/);
+			} finally { await emit(harness, "session_shutdown", {}); }
+		});
+	}
+
+	test("off and unavailable mirror leave every compaction reason untouched", async (t) => {
+		for (const policy of ["auto", "off"] as const) {
+			const harness = createHarness();
+			liveContextExtension(harness.pi, { editingMode: "clm", nativeCompaction: policy });
+			await emit(harness, "session_start", {});
+			await harness.commands.get("clm").handler("off", harness.ctx);
+			for (const reason of ["manual", "threshold", "overflow"]) assert.deepEqual(await emit(harness, "session_before_compact", { reason }), [undefined]);
+			await emit(harness, "session_shutdown", {});
+		}
+		const failed = t.mock.method(MirrorStore, "create", async () => { throw new Error("unavailable"); });
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm", nativeCompaction: "off" });
+		await emit(harness, "session_start", {});
+		for (const reason of ["manual", "threshold", "overflow"]) assert.deepEqual(await emit(harness, "session_before_compact", { reason }), [undefined]);
+		failed.mock.restore();
+		await emit(harness, "session_shutdown", {});
+	});
+
+	test("unknown earlier context transformations are preserved, not assumed to be source entries", async () => {
+		const { harness, path } = await started();
+		try {
+			const raw = rawConversation();
+			await emit(harness, "context", { messages: raw });
+			const transformed = [{ ...raw[0], content: "unmappable context transform" }, raw[1]];
+			await emit(harness, "context", { messages: transformed, persistSources: false });
+			const text = await readFile(path, "utf8");
+			assert.match(text, /index=1 role=user[^\n]*protected=true/);
+			await submit(path, compactSecondTurn(text).replace("unmappable context transform", "removed"));
+			const result = await nextRequest(harness);
+			assert.equal(result[0].messages[0].content, "unmappable context transform");
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+
+	test("current SDK prompt sections compose without replacing other extensions", async () => {
+		const { harness } = await started();
+		try {
+			const event = { systemPromptOptions: { sections: { prior: "existing" }, forceSystemPrompt: "forced" } };
+			const result = await harness.handlers.get("before_agent_start")![0](event, harness.ctx);
+			assert.equal(result, undefined);
+			assert.equal(event.systemPromptOptions.sections.prior, "existing");
+			assert.match((event.systemPromptOptions.sections as any).editable_context, /atomically rename/);
+			assert.match(event.systemPromptOptions.forceSystemPrompt, /^forced/);
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+});
+
+
+test("persisted overflow links survive mirror deletion, resume, and same-host branch copies", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-clm-session-"));
+	const sessionFile = join(directory, "session.jsonl");
+	const harness = createHarness();
+	harness.ctx.sessionManager.getSessionFile = () => sessionFile;
+	liveContextExtension(harness.pi, { editingMode: "clm", budget: { contextBudget: 1000, reserve: 0 } });
+	await emit(harness, "session_start", {});
+	try {
+		const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+		const path = before[0].systemPrompt.match(/mirrored at `([^`]+)`/)[1] as string;
+		const raw: LiveContextMessage[] = [
+			{ role: "user", content: "task", timestamp: 1 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "output", name: "read", arguments: {} }], timestamp: 2 },
+			{ role: "toolResult", toolCallId: "output", toolName: "read", content: [{ type: "text", text: "full output\n".repeat(2000) }], timestamp: 3 },
+		];
+		const first = await emit(harness, "context", { messages: raw });
+		const note = first[0].messages.find((message: any) => message.role === "toolResult").content[0].text;
+		const file = /Full text: (.+)$/.exec(note)![1];
+		assert.ok(file.startsWith(`${sessionFile}.clm-outputs/`));
+		assert.equal(await readFile(file, "utf8"), "full output\n".repeat(2000));
+		await submit(path, (await readFile(path, "utf8")).replace("\ntask", "\ntask retained"));
+		await nextRequest(harness);
+		assert.equal(harness.branch.at(-1).data.lastOutcome.kind, "applied");
+		await emit(harness, "session_shutdown", {});
+		await assert.rejects(readFile(path, "utf8"));
+		assert.equal(await readFile(file, "utf8"), "full output\n".repeat(2000));
+		for (const copied of [false, true]) {
+			const resumed = createHarness(structuredClone(harness.branch));
+			resumed.ctx.sessionManager.getSessionFile = () => copied ? join(directory, "copy.jsonl") : sessionFile;
+			clmExtension(resumed.pi);
+			await emit(resumed, "session_start", {});
+			try {
+				const result = await emit(resumed, "context", { messages: raw });
+				assert.ok(JSON.stringify(result[0].messages).includes(file));
+				assert.equal(await readFile(file, "utf8"), "full output\n".repeat(2000));
+			} finally { await emit(resumed, "session_shutdown", {}); }
+		}
+	} finally {
+		await emit(harness, "session_shutdown", {});
+		await rm(directory, { recursive: true, force: true });
+	}
 });

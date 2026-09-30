@@ -1,12 +1,11 @@
 # How pi-clm works
 
-pi-clm lets the model manage its own context. The context the model will see on its next
-request is mirrored to a file; the model edits that file with ordinary tools; the edited
-version becomes its next context. Pi's session history is never rewritten.
+pi-clm lets the model edit its future conversational context without rewriting Pi's
+session history. It uses stock Pi public APIs and ordinary local file operations.
 
-## The mirror
+## Snapshot and submission
 
-Before every request pi-clm writes the model-visible conversation to a private file:
+Before each request, pi-clm writes a private `LIVE_CONTEXT.md` snapshot:
 
 ```text
 [[LIVE_CONTEXT version=1 revision=2 document=<nonce> baseline=<digest>]]
@@ -19,30 +18,45 @@ TASK TRACKER
 - ...
 ```
 
-During its turn the model may rewrite that file however it likes: shorten stale tool
-output in place, delete or reorder blocks, insert new ones (`id=new-…`, any role label),
-grow a scratchpad, or replace everything with plain text (that becomes one `notes` block
-after the original task). At the end of the turn pi-clm validates the file, keeps
-untouched messages as their original objects, repairs tool-call pairs, saves the result as
-a revision on the current branch, and uses it for the next request. Nothing shrinks
-unless the model shrinks it; the harness only guarantees the request is legal and tells
-the model how much room it has.
+1. Read or copy one snapshot into a private draft beside the mirror.
+2. Edit the draft with Bash, Python, or another ordinary file tool. Keep its first
+   metadata line exactly, together with the headers of retained blocks.
+3. Close the completed draft, then **atomically rename** it to `LIVE_CONTEXT.commit.md`
+   in the same directory. Do not write that submission path incrementally.
+4. The next context request claims and validates the submission. A `[LIVE CONTEXT]`
+   notice reports acceptance or rejection. Saving or finishing a tool is not acceptance.
+
+The mirror itself is read-only input to this protocol: direct changes to it are ignored.
+Explicit submission prevents a request or turn-end event from accepting a partially
+written file while an asynchronous editor is still running. Only one submission slot
+exists; do not submit competing drafts concurrently.
+
+The last **16 request snapshots** of the current accepted revision remain eligible.
+Unrelated requests and new raw messages do not conflict: an older draft can be accepted
+while preserving all messages appended after its source prefix. A conflicting accepted
+edit, changed source prefix/model, branch transition, reset, disabling, reload, or snapshot
+expiry rejects the old draft. Read the new mirror and prepare a new draft after rejection.
+Submissions are limited to 16 MiB.
+
+In CLM mode, editable blocks may shrink, grow, be removed, or be reordered without crossing
+protected blocks. New blocks use `id=new-…`; their role labels are descriptive text, not
+system-message authority. A global summary retains the exact metadata line but omits all
+turn headers; the original task and protected native/opaque spans remain. Pending calls,
+ambiguous native groups, and content not safely mapped to public session sources cannot
+be edited or discarded. Signed and unknown content is preserved rather than guessed at.
 
 ## What runs without the model
 
-Two things run on their own, because a single turn with many parallel tool calls can
-outrun any reminder:
+- **Overflow guard:** over budget, eligible old tool-result text is replaced with a note
+  linking to a full-text file. File-backed sessions store content-addressed files under
+  `<session-file>.clm-outputs/`, outside the disposable mirror. Ordinary file tools can
+  read them; the optional recall tool is not required. Failed saves keep the source text.
+- **Calibration:** provider-reported usage adjusts the character-based estimate.
 
-- **Overflow guard** — if the estimated request exceeds the budget (default: the model's
-  context window minus generation headroom), the oldest tool results after the last edit
-  are swapped for one-line notes pointing at files with the full text.
-- **Calibration** — the size estimate is corrected against the provider's own count of
-  each request, so dense content (code, random strings) does not slip past the budget.
-
-Pi's automatic compaction is paused in CLM mode; it measures the raw transcript and would
-discard the model's edits. Manual `/compact` still works, but it summarizes the raw
-history and resets the projection; `/clm-compact` instead asks the model to do the
-compaction by editing its mirror, with a fixed prompt you can replace.
+The default compaction policy pauses Pi's threshold compaction only while CLM is enabled,
+its mirror is available, and the guard enforces a budget. `/clm off` leaves every native
+compaction reason untouched. Manual `/compact` still summarizes raw history and resets
+the projection; `/clm-compact` asks the model to submit its own edit instead.
 
 ## The panel
 
@@ -65,13 +79,26 @@ compaction by editing its mirror, with a fixed prompt you can replace.
   `Enter` changes a setting (cycles its choices, or asks for a value). Changes apply at
   once and are saved in the session; see [configuration.md](configuration.md).
 
-## Safety
+## Storage and safety
 
-The mirror holds conversation data (`0700`/`0600`, under the OS temp dir, removed at
-shutdown). Model-editable memory is a prompt-injection surface: injected text can induce
-the model to rewrite its own constraints. pi-clm keeps the real system prompt out of the
-mirror and lowers authored roles to plain text, but it cannot stop a model from dropping
-context it should have kept. Remote tool backends cannot see the local mirror.
+Mirror files contain conversation data, with private directory/file permissions under
+the OS temporary directory. They are removed at shutdown. Durable overflow files use
+private permissions and survive shutdown, resume, and projection reset. They are not
+automatically garbage-collected; retain them as long as any session references them.
+In-memory sessions have only temporary output storage.
+
+Branches copied on the same host can continue reading the original artifact paths.
+Moving a session to another machine does not relocate absolute links: preserve the
+referenced files and paths when moving it. Already-broken temporary links written by
+upstream 1.0.0 are not repaired automatically; the original result may still exist in the
+canonical session history.
+
+Model-editable memory is a prompt-injection surface. The real system prompt stays out
+of the mirror and authored roles become plain text, but the extension cannot judge
+whether the model has discarded a fact it needs. Remote tool backends need access to
+the same filesystem to use the protocol. No helper-tool bridge is required for editing
+or reading overflow files. Optional annotation/recall tools are described in the
+[configuration guide](configuration.md).
 
 ## Further reading
 

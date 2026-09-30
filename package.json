@@ -1,20 +1,40 @@
 {
-  "name": "@lolipopshock/pi-clm",
+  "name": "@clankerwrangler/pi-clm",
   "version": "1.0.0",
   "description": "Pi extension that lets the model manage its own context: the next request's context is mirrored to a file the model edits with ordinary tools",
   "type": "module",
   "license": "MIT",
-  "homepage": "https://github.com/lolipopshock/pi-clm#readme",
-  "bugs": { "url": "https://github.com/lolipopshock/pi-clm/issues" },
-  "publishConfig": { "access": "public" },
-  "packageManager": "pnpm@10.2.1",
-  "engines": { "node": ">=22" },
-  "keywords": ["pi-package", "pi-extension", "pi", "context-management", "context-window", "context-language-models"],
-  "pi": {
-    "extensions": ["./index.ts"],
-    "image": "https://raw.githubusercontent.com/lolipopshock/pi-clm/main/.github/images/overview.png"
+  "homepage": "https://github.com/clankerwrangler/pi-clm#readme",
+  "bugs": {
+    "url": "https://github.com/clankerwrangler/pi-clm/issues"
   },
-  "files": ["index.ts", "src/**", "!src/__tests__/**", "steering/**", "docs/*.md", "LICENSE", "README.md"],
+  "packageManager": "pnpm@10.2.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "context-management",
+    "context-window",
+    "context-language-models"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/clankerwrangler/pi-clm/main/.github/images/overview.png"
+  },
+  "files": [
+    "index.ts",
+    "src/**",
+    "!src/__tests__/**",
+    "steering/**",
+    "docs/*.md",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "test": "tsx --test src/__tests__/*.test.ts",
     "typecheck": "tsc --noEmit",
@@ -28,21 +48,18 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.85.0",
-    "@earendil-works/pi-ai": "0.85.0",
-    "@earendil-works/pi-coding-agent": "0.85.0",
-    "@earendil-works/pi-tui": "0.85.0",
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-tui": "0.99.1",
     "@types/node": "22.19.15",
     "tsx": "4.21.0",
     "typebox": "1.1.12",
     "typescript": "5.9.3"
   },
-  "pnpm": {
-    "packageExtensions": {
-      "@earendil-works/pi-coding-agent@0.85.0": {
-        "dependencies": { "@earendil-works/pi-server": "0.85.0" }
-      }
-    }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clankerwrangler/pi-clm.git"
   },
-  "repository": { "type": "git", "url": "git+https://github.com/lolipopshock/pi-clm.git" }
+  "private": true
 }

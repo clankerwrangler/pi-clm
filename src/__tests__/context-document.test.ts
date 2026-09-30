@@ -366,3 +366,71 @@ describe("opaque content preservation", () => {
 		assert.equal(result.messages[2], messages[2]);
 	});
 });
+
+
+describe("native pending and opaque spans", () => {
+	const call: LiveContextMessage = { role: "assistant", content: [toolCall("a", "a"), toolCall("b", "b")], timestamp: 1 };
+	const a: LiveContextMessage = { role: "toolResult", toolCallId: "a", content: [{ type: "text", text: "A" }], timestamp: 2 };
+	const unrelated: LiveContextMessage = { role: "assistant", content: [{ type: "text", text: "old explanation" }], timestamp: 3 };
+	test("unrelated editing preserves an outstanding parallel call and its completed sibling", () => {
+		const messages = [call, a, unrelated];
+		const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
+		assert.equal(snapshot.blocks[0].protected, true);
+		assert.equal(snapshot.blocks[1].protected, true);
+		const result = applyContextDocument(replaceBody(snapshot, 2, "short"), snapshot, { editingMode: "clm" });
+		assert.equal(result.accepted, true);
+		assert.equal(result.messages[0], call);
+		assert.equal(result.messages[1], a);
+		assert.equal(hasOrphanToolMessages(result.messages), false, "pending is not orphaned");
+	});
+	test("complete nonadjacent native results stay structured during unrelated edits", () => {
+		const b = { ...a, toolCallId: "b", timestamp: 4 };
+		const messages = [call, a, unrelated, b];
+		const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
+		const result = applyContextDocument(replaceBody(snapshot, 2, "short"), snapshot, { editingMode: "clm" });
+		assert.equal(result.accepted, true);
+		assert.equal(result.messages[0], call);
+		assert.equal(result.messages[1], a);
+		assert.equal(result.messages[3], b);
+	});
+	for (const nonadjacent of [false, true]) {
+		test(`reordering a complete ${nonadjacent ? "nonadjacent" : "adjacent"} pair normalizes only the inverted group`, () => {
+			const single = { ...call, content: [toolCall("a", "a")] };
+			const messages = nonadjacent ? [single, unrelated, a] : [single, a];
+			const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
+			const blocks = [...snapshot.blocks].reverse();
+			const edited = snapshot.text.split("[[CTX_TURN")[0] + blocks.map((block) => `${block.header}\n${block.body}`).join("\n\n");
+			const result = applyContextDocument(edited, snapshot, { editingMode: "clm" });
+			assert.equal(result.accepted, true);
+			assert.equal(hasOrphanToolMessages(result.messages), false);
+			assert.equal(result.messages.some((m) => m.role === "toolResult"), false);
+			assert.equal(result.messages.some((m) => m.role === "assistant" && Array.isArray(m.content) && m.content.some((part: any) => part.type === "toolCall")), false);
+			if (nonadjacent) assert.equal(result.messages[1], unrelated);
+		});
+	}
+	test("unrelated edits retain an already orphaned native result exactly", () => {
+		const snapshot = renderContextDocument([a, unrelated], { protectedIndexes: new Set() });
+		const result = applyContextDocument(replaceBody(snapshot, 1, "short"), snapshot, { editingMode: "clm" });
+		assert.equal(result.accepted, true);
+		assert.equal(result.messages[0], a);
+	});
+
+	test("headerless summary keeps native pending, signed blocks, and foreign checkpoint exact", () => {
+		const signed = { role: "assistant", content: [{ type: "text", text: "signed", textSignature: "opaque" }], timestamp: 5 };
+		const opaque = { role: "custom", customType: "foreign-checkpoint", content: "marker", details: { providerHistory: "opaque" }, timestamp: 6 };
+		const messages = [call, a, unrelated, signed, opaque];
+		const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
+		const result = applyContextDocument(`${snapshot.text.split("\n")[0]}\nsummary`, snapshot, { editingMode: "clm" });
+		assert.equal(result.accepted, true);
+		assert.deepEqual(result.messages.slice(0, 4), [call, a, signed, opaque]);
+		assert.equal(result.messages[0], call);
+		assert.equal(result.messages[3], opaque);
+	});
+	test("moving protected pending spans is rejected rather than repaired into text", () => {
+		const snapshot = renderContextDocument([call, a, unrelated], { protectedIndexes: new Set() });
+		const reordered = snapshot.text.split("[[CTX_TURN")[0] + [snapshot.blocks[2], snapshot.blocks[0], snapshot.blocks[1]].map((block) => `${block.header}\n${block.body}`).join("\n\n");
+		const result = applyContextDocument(reordered, snapshot, { editingMode: "clm" });
+		assert.equal(result.accepted, false);
+		assert.match(result.reason ?? "", /protected native or opaque span/);
+	});
+});

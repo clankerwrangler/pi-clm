@@ -29,7 +29,8 @@ import { steeringPathFromEnv } from "./src/steering.ts";
  *   prompt ({{mirror}} {{current}} {{budget}} {{instructions}}); "default"/"none"/"off" = built in.
  * - PI_CLM_NATIVE_COMPACTION — "auto" (default): cancel Pi's threshold compaction while a
  *   budget is enforced by the overflow guard; "off": cancel all automatic compaction;
- *   "on": Pi default.
+ *   "on": Pi default. Disabled/unavailable editing always leaves compaction untouched.
+ * - PI_CLM_TOOL_EXPOSURE — "direct" (default) or "codemode" for the optional helpers.
  */
 function flagFromEnv(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
 	const raw = env[name]?.trim().toLowerCase();
@@ -42,9 +43,17 @@ function nativeCompactionFromEnv(env: NodeJS.ProcessEnv = process.env): "auto" |
 	if (raw === "auto" || raw === "off" || raw === "on") return raw;
 	throw new Error(`PI_CLM_NATIVE_COMPACTION must be auto, off or on, got ${raw}`);
 }
+export function toolExposureFromEnv(env: NodeJS.ProcessEnv = process.env): "direct" | "codemode" {
+	const raw = env.PI_CLM_TOOL_EXPOSURE?.trim();
+	if (!raw) return "direct";
+	if (raw === "direct" || raw === "codemode") return raw;
+	throw new Error(`PI_CLM_TOOL_EXPOSURE must be direct or codemode, got ${raw}`);
+}
+
 export default function clmExtension(pi: ExtensionAPI): void {
 	liveContextExtension(pi, {
 		editingMode: "clm",
+		toolExposure: toolExposureFromEnv(),
 		budget: budgetPolicyFromEnv(),
 		observationCap: observationCapFromEnv(),
 		steeringPath: steeringPathFromEnv(),

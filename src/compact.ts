@@ -2,7 +2,7 @@
  * `/clm-compact [instructions]`: ask the model to compact its own live context now.
  *
  * This is a fixed prompt, not a harness-side edit: the model decides what to keep and
- * edits the mirror with its tools, and the edit is validated and committed at turn end like
+ * submits a snapshot draft with its tools, and the edit is validated on the next context request like
  * any other. (Pi's `/compact` instead summarizes the raw transcript with a separate call
  * and resets the CLM projection.)
  *
@@ -16,13 +16,13 @@ import { formatTokens } from "./settings.ts";
 
 export const DEFAULT_COMPACT_PROMPT = `Compact your live context now.
 
-Your next request is about {{current}} tokens{{budget}}. Your context is mirrored at \`{{mirror}}\`; edit that file, following the Editable context protocol, to remove what you no longer need.
+Your next request is about {{current}} tokens{{budget}}. Your context is mirrored at \`{{mirror}}\`; submit an edited draft, following the Editable context protocol, to remove what you no longer need.
 
-Keep what you still need: the task and the user's latest requests, decisions and their reasons, open items, and exact values (ids, paths, numbers) you will use again. Drop what you no longer need: tool output you have already used, superseded drafts and intermediate steps. Prefer one scripted edit of the whole file over many small ones.
+Keep what you still need: the task and the user's latest requests, decisions and their reasons, open items, and exact values (ids, paths, numbers) you will use again. Drop what you no longer need: tool output you have already used, superseded drafts and intermediate steps. Prefer one scripted draft with batched changes over many small submissions.
 
 {{instructions}}
 
-When the edit is saved, reply in one line: what you kept, and the new approximate size.`;
+After the next [LIVE CONTEXT] notice confirms acceptance, reply in one line: what you kept, and the new approximate size.`;
 
 export interface CompactPromptValues {
 	mirror: string;

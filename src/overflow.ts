@@ -17,7 +17,8 @@
  *   or replace it, and can re-read the saved file with offset/limit.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, lstatSync, linkSync, unlinkSync, openSync, fsyncSync, closeSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { LiveContextMessage } from "./types.ts";
 
@@ -87,7 +88,38 @@ export function withheldNoteText(record: Omit<WithheldRecord, "message">, _estim
 }
 
 const withheldCache = new WeakMap<LiveContextMessage, LiveContextMessage>();
-const savedFiles = new WeakMap<LiveContextMessage, string>();
+/** Publish immutable text under its content hash. Never replace an existing artifact. */
+export function saveWithheldText(directory: string, text: string): string {
+	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	const info = lstatSync(directory);
+	if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Invalid output directory.");
+	const hash = createHash("sha256").update(text).digest("hex");
+	const file = join(directory, `${hash}.txt`);
+	const validate = () => {
+		const info = lstatSync(file);
+		if (!info.isFile() || info.isSymbolicLink() || readFileSync(file, "utf8") !== text) throw new Error("Output artifact hash conflict.");
+	};
+	try { validate(); return file; } catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	const temporary = join(directory, `.${randomUUID()}.tmp`);
+	try {
+		writeFileSync(temporary, text, { mode: 0o600, flag: "wx" });
+		const fd = openSync(temporary, "r");
+		try { fsyncSync(fd); } finally { closeSync(fd); }
+		try { linkSync(temporary, file); } catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		validate();
+		if (process.platform !== "win32") {
+			const directoryFd = openSync(directory, "r");
+			try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
+		}
+		return file;
+	} finally {
+		try { unlinkSync(temporary); } catch { /* No temporary file remains after successful publication. */ }
+	}
+}
 
 export interface ApplyOverflowGuardOptions {
 	limit: number;
@@ -98,6 +130,7 @@ export interface ApplyOverflowGuardOptions {
 	saveDirectory?: string;
 	/** Only messages at or after this index are candidates (the raw suffix after the last accepted edit); default 0. */
 	protectBefore?: number;
+	protectedIndexes?: Set<number>;
 }
 
 /**
@@ -113,7 +146,7 @@ export function applyOverflowGuard(messages: LiveContextMessage[], options: Appl
 	const candidates: number[] = [];
 	for (let index = options.protectBefore ?? 0; index < messages.length; index++) {
 		const message = messages[index]!;
-		if (message.role !== "toolResult") continue;
+		if (message.role !== "toolResult" || options.protectedIndexes?.has(index)) continue;
 		if (withheldCache.get(message) === message) continue; // already a note
 		const text = toolResultText(message);
 		if (text.startsWith("[pi-clm overflow guard]")) continue;
@@ -125,16 +158,13 @@ export function applyOverflowGuard(messages: LiveContextMessage[], options: Appl
 	for (const index of candidates) {
 		const source = output[index]!;
 		const tokens = options.estimate([source]);
-		let file = savedFiles.get(source);
-		if (!file && options.saveDirectory) {
+		let file: string | undefined;
+		if (options.saveDirectory) {
 			try {
-				mkdirSync(options.saveDirectory, { recursive: true, mode: 0o700 });
-				const safeId = String(source.toolCallId ?? `idx${index}`).replace(/[^A-Za-z0-9_-]/g, "_");
-				file = join(options.saveDirectory, `${safeId}.txt`);
-				writeFileSync(file, toolResultText(source), { mode: 0o600 });
-				savedFiles.set(source, file);
+				file = saveWithheldText(options.saveDirectory, toolResultText(source));
 			} catch {
-				file = undefined;
+				// Keeping the source is safer than publishing an unreadable recall link.
+				continue;
 			}
 		}
 		const record: WithheldRecord = {
@@ -145,10 +175,11 @@ export function applyOverflowGuard(messages: LiveContextMessage[], options: Appl
 			file,
 		};
 		let note = withheldCache.get(source);
-		if (!note) {
+		const content = withheldNoteText(record, estimated, options.limit);
+		if (!note || toolResultText(note) !== content) {
 			note = {
 				...source,
-				content: [{ type: "text", text: withheldNoteText(record, estimated, options.limit) }],
+				content: [{ type: "text", text: content }],
 			};
 			withheldCache.set(source, note);
 			withheldCache.set(note, note);

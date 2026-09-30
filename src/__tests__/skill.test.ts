@@ -24,7 +24,7 @@ describe("live-context editing guidance", () => {
 		const guidance = systemGuidance("/tmp/LIVE_CONTEXT.md");
 		assert.match(guidance, /Default to surgical edits/);
 		assert.match(guidance, /complete user\/assistant exchanges/);
-		assert.match(guidance, /One batched mirror write may\s+contain many disjoint edits/);
-		assert.match(guidance, /exact retention of both user and assistant messages/);
+		assert.match(guidance, /atomically rename/);
+		assert.match(guidance, /both user and assistant messages exactly/);
 	});
 });

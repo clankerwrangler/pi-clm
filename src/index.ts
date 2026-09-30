@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,10 +11,11 @@ import {
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
+	type ContextEvent,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { applyContextDocument, renderContextDocument } from "./context-document.ts";
+import { applyContextDocument, canonicalMessage, digestMessages, intrinsicProtectedIndexes, renderContextDocument } from "./context-document.ts";
 import {
 	CONTINUITY_SIZE_WARNING_TOKENS,
 	DEFAULT_RECALL_TOKENS,
@@ -194,6 +196,8 @@ function sameMessageSequence(left: LiveContextMessage[], right: LiveContextMessa
 }
 
 export interface LiveContextExtensionOptions {
+	/** Optional helpers: direct declarations (default), or callable only from code-mode tools. */
+	toolExposure?: "direct" | "codemode";
 	editingMode?: "conservative" | "clm";
 	/** CLM-mode budget/reminder policy. Ignored in conservative mode, which keeps the percentage tiers. */
 	budget?: Partial<BudgetPolicyConfig>;
@@ -230,6 +234,19 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let state = initialLiveContextState();
 	let store: MirrorStore | undefined;
 	let turnBaseline: TurnBaseline | undefined;
+	// Retain bounded immutable snapshots so unrelated requests do not race async writers.
+	const drafts = new Map<string, TurnBaseline & { model: string }>();
+	const immutableMessages = new WeakMap<LiveContextMessage, { digest: string; value: LiveContextMessage }>();
+	const snapshotMessages = (messages: LiveContextMessage[]) => messages.map((message) => {
+		const digest = digestMessages([message]);
+		const existing = immutableMessages.get(message);
+		if (existing?.digest === digest) return existing.value;
+		const value = structuredClone(message);
+		immutableMessages.set(message, { digest, value });
+		return value;
+	});
+	let contextPending: Promise<unknown> = Promise.resolve();
+	const modelIdentity = (ctx: ExtensionContext) => JSON.stringify([ctx.model?.provider, ctx.model?.id, ctx.model?.api]);
 	let lifecycleEpoch = 0;
 	/** A /clm-compact waiting for the agent to go idle; a second one is refused instead of racing it. */
 	let compactPending = false;
@@ -588,6 +605,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		} else {
 			persistOutcome({ ...state, enabled: false, event: { kind: "disabled", at: new Date().toISOString() } });
 			lifecycleEpoch++;
+			drafts.clear();
 			turnBaseline = undefined;
 			currentContextView = undefined;
 		}
@@ -649,6 +667,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	function restore(ctx: ExtensionContext): void {
 		lifecycleEpoch++;
+		drafts.clear();
 		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
 		state = reconstructLiveContextState(branch);
 		checkpointHistory = reconstructLiveContextHistory(branch)
@@ -823,6 +842,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	pi.registerTool({
 		name: "live_context_annotate",
+		exposure: options.toolExposure ?? "direct",
 		label: "Live Context Annotate",
 		description:
 			"Create, resolve, or list branch-local continuity annotations. Create uses a current mirror block ID or active Pi entry ID. pin keeps a bounded exact textual source visible; continuity keeps a durable reason/next-action pointer; archive is recall-only.",
@@ -918,6 +938,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	pi.registerTool({
 		name: "live_context_recall",
+		exposure: options.toolExposure ?? "direct",
 		label: "Live Context Recall",
 		description: `Recall the exact textual source for a branch-local annotation by ID. Output is bounded to ${MIN_RECALL_TOKENS}-${MAX_RECALL_TOKENS} estimated tokens (default ${DEFAULT_RECALL_TOKENS}) and validated against the durable Pi entry's content hash.`,
 		promptSnippet: "Recall a bounded exact source from a durable live-context annotation",
@@ -990,8 +1011,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	/**
 	 * `/clm-compact [instructions]`: send the (configurable) compaction prompt as a user
-	 * message. The model does the editing; its edit is validated and committed at turn end
-	 * like any other.
+	 * message. The model submits a completed draft for validation before the next request.
 	 */
 	async function compactCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
 		if (compactPending) {
@@ -1219,6 +1239,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			case "off":
 				persistOutcome({ ...state, enabled: false, event: { kind: "disabled", at: new Date().toISOString() } });
 				lifecycleEpoch++;
+				drafts.clear();
 				turnBaseline = undefined;
 				currentContextView = undefined;
 				updateStatus(ctx);
@@ -1227,6 +1248,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			case "reset":
 				persist(resetProjectionState(state, "Projection reset by user."));
 				lifecycleEpoch++;
+				drafts.clear();
 				turnBaseline = undefined;
 				currentContextView = undefined;
 				lastBudgetReading = undefined;
@@ -1258,12 +1280,23 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	pi.on("before_agent_start", async (event) => {
 		if (!state.enabled || !store) return;
-		const sections = [event.systemPrompt, systemGuidance(store.filePath, editingMode)];
+		const sections = [systemGuidance(store.filePath, editingMode)];
 		if (steering) sections.push(steeringPromptSection(steering));
-		return { systemPrompt: sections.join("\n\n") };
+		event.systemPromptOptions.sections["editable_context"] = sections.join("\n\n");
+		// Respect an earlier extension's explicit full-prompt override.
+		if (event.systemPromptOptions.forceSystemPrompt !== undefined) {
+			event.systemPromptOptions.forceSystemPrompt += `\n\n${sections.join("\n\n")}`;
+		}
 	});
 
-	pi.on("context", async (event, ctx) => {
+	pi.on("context", (event, ctx) => {
+		const epoch = lifecycleEpoch;
+		const run = contextPending.then(() => epoch === lifecycleEpoch ? prepareContext(event, ctx) : undefined);
+		contextPending = run.catch(() => undefined);
+		return run;
+	});
+
+	async function prepareContext(event: ContextEvent, ctx: ExtensionContext) {
 		const rawMessages = asLiveMessages(event.messages);
 		if (!state.enabled) {
 			turnBaseline = undefined;
@@ -1287,6 +1320,9 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			return output.length === rawMessages.length ? undefined : { messages: asAgentMessages(output) };
 		}
 
+		const epoch = lifecycleEpoch;
+		await acceptSubmission(rawMessages, ctx);
+		if (epoch !== lifecycleEpoch || !state.enabled || !store) return;
 		let effectiveMessages = rawMessages;
 		let suffixMessages: LiveContextMessage[] = [];
 		let projection = applyProjection(rawMessages, state.checkpoint);
@@ -1333,7 +1369,19 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 		const visibleRawMessages = selectContextVisibleMessages(rawMessages);
 		effectiveMessages = selectContextVisibleMessages(effectiveMessages);
-		if (editingMode === "clm") effectiveMessages = capObservations(effectiveMessages, observationCap);
+		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
+		const owned = new Set([
+			...(state.checkpoint?.projectedMessages.map(canonicalMessage) ?? []),
+			...branch.flatMap((entry) => { const message = messageFromSessionEntry(entry); return message ? [canonicalMessage(message)] : []; }),
+		]);
+		const unmapped = new Set(effectiveMessages.flatMap((message, index) =>
+			owned.has(canonicalMessage(message)) ? [] : [index],
+		));
+		const protectedContent = new Set([...unmapped, ...intrinsicProtectedIndexes(effectiveMessages)]);
+		if (editingMode === "clm") {
+			const capped = capObservations(effectiveMessages, observationCap);
+			effectiveMessages = effectiveMessages.map((message, index) => protectedContent.has(index) ? message : capped[index]);
+		}
 		pendingOverflowNotice = undefined;
 		// Learn from the provider's count of the previous request before estimating this one.
 		if (editingMode === "clm") calibrator.observe(lastProviderReportedTokens(rawMessages));
@@ -1347,8 +1395,11 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				const guarded = applyOverflowGuard(effectiveMessages, {
 					limit,
 					fixedTokens,
+					protectedIndexes: protectedContent,
 					estimate: (messages) => calibrator.apply(estimateLiveContextTokens(messages)),
-					saveDirectory: store ? join(store.directory, "withheld") : undefined,
+					saveDirectory: ctx.sessionManager.getSessionFile()
+						? `${ctx.sessionManager.getSessionFile()}.clm-outputs`
+						: join(store.directory, "withheld"),
 					// Only the raw suffix after the accepted projection is withholdable; the
 					// model's own accepted context is respected.
 					protectBefore: state.checkpoint
@@ -1385,24 +1436,24 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 		// Extension-managed continuity is appended after the editable projection so
 		// mirror compression cannot silently remove an active obligation or exact pin.
-		const snapshot = renderContextDocument(effectiveMessages, {
+		const snapshot = renderContextDocument(snapshotMessages(effectiveMessages), {
 			revision: state.revision,
-			...(editingMode === "clm"
-				? {
-					protectedIndexes: new Set<number>(),
-					// Nonce stays constant until the next accepted edit: header ids read on
-					// one call remain valid on the next.
-					documentSeed: `${ctx.sessionManager.getSessionId()}:${state.checkpoint?.sourceDigest ?? "raw"}`,
-				}
-				: {}),
+			protectedIndexes: editingMode === "clm" ? unmapped : undefined,
+			additionalProtectedIndexes: unmapped,
+			documentSeed: randomUUID(),
 		});
+		const rawSnapshot = snapshotMessages(rawMessages);
+		const snapshotModel = modelIdentity(ctx);
 		try {
 			await store.write(snapshot.text);
+			if (epoch !== lifecycleEpoch || !state.enabled) return;
 			turnBaseline = {
-				rawMessages: [...rawMessages],
-				effectiveMessages: [...effectiveMessages],
+				rawMessages: rawSnapshot,
+				effectiveMessages: snapshot.messages,
 				snapshot,
 			};
+			drafts.set(snapshot.documentId, { ...turnBaseline, model: snapshotModel });
+			while (drafts.size > 16) drafts.delete(drafts.keys().next().value!);
 		} catch (error) {
 			turnBaseline = undefined;
 			const message = error instanceof Error ? error.message : String(error);
@@ -1440,10 +1491,10 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			);
 		}
 		return { messages: asAgentMessages(output) };
-	});
+	}
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		if (editingMode !== "clm" || nativeCompaction === "on" || event.reason === "manual") return undefined;
+		if (!state.enabled || !store || editingMode !== "clm" || nativeCompaction === "on" || event.reason === "manual") return undefined;
 		if (nativeCompaction === "off") {
 			queueOutcomeNotice(
 				`Pi's automatic compaction (${event.reason}) was cancelled: pi-clm manages this context. Edit the mirror to free space.`,
@@ -1549,27 +1600,31 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		return { content };
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", (_event, ctx) => {
+		if (state.enabled && store) captureObservedUsage(ctx);
+	});
+
+	async function acceptSubmission(rawMessages: LiveContextMessage[], ctx: ExtensionContext): Promise<void> {
 		if (!state.enabled || !store) return;
-		captureObservedUsage(ctx);
-		if (!turnBaseline) return;
-		const baseline = turnBaseline;
 		const activeStore = store;
 		const epoch = lifecycleEpoch;
-		turnBaseline = undefined;
-
 		let editedText: string | undefined;
 		try {
-			editedText = await activeStore.read();
+			editedText = await activeStore.readSubmission();
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			queueOutcomeNotice(`Mirror read failed: ${message}`);
+			queueOutcomeNotice(`Submission read failed: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
-		// A tree move/reset/shutdown during async I/O invalidates the captured draft,
-		// even when the newly selected branch happens to have the same revision number.
-		if (epoch !== lifecycleEpoch || activeStore !== store || !state.enabled || baseline.snapshot.revision !== state.revision) return;
-		if (editedText === undefined || editedText.trim() === baseline.snapshot.text.trim()) return;
+		if (editedText === undefined) return;
+		if (epoch !== lifecycleEpoch || activeStore !== store || !state.enabled) return;
+		const id = /^\[\[LIVE_CONTEXT version=1 revision=\d+ document=([a-f0-9]{64}) /.exec(editedText)?.[1];
+		const baseline = id ? drafts.get(id) : undefined;
+		if (!baseline || baseline.snapshot.revision !== state.revision || baseline.model !== modelIdentity(ctx) ||
+			digestMessages(rawMessages.slice(0, baseline.rawMessages.length)) !== digestMessages(baseline.rawMessages)) {
+			queueOutcomeNotice("Edit rejected: expired or conflicting snapshot. Read the current mirror and submit a new draft.");
+			return;
+		}
+		if (editedText.trim() === baseline.snapshot.text.trim()) return;
 
 		// Pi's provider-independent token estimator is injected as the single acceptance
 		// and reporting metric; the core's default character estimate stays for callers
@@ -1655,6 +1710,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			ctx.ui.notify("Live-context checkpoint persistence failed; previous revision retained.", "error");
 			return;
 		}
+		drafts.clear();
 		const managedContinuity = continuityMessage(ctx, result.messages);
 		const modelEffectiveMessages = managedContinuity
 			? [...result.messages, managedContinuity]
@@ -1674,7 +1730,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const restored = result.diagnostics.length > 0 ? ` ${result.diagnostics.join(" ")}` : "";
 		queueOutcomeNotice(`${appliedMessage}${restored}`);
 		updateStatus(ctx);
-	});
+	}
 
 	pi.on("session_tree", async (_event, ctx) => {
 		restore(ctx);
@@ -1684,6 +1740,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	pi.on("session_compact", async (_event, ctx) => {
 		persist(resetProjectionState(state, "Projection reset after native Pi compaction."));
 		lifecycleEpoch++;
+		drafts.clear();
 		turnBaseline = undefined;
 		currentContextView = undefined;
 		lastBudgetReading = undefined;
@@ -1694,6 +1751,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		lifecycleEpoch++;
+		drafts.clear();
 		turnBaseline = undefined;
 		currentContextView = undefined;
 		ctx.ui.setStatus(STATUS_KEY, undefined);

@@ -27,15 +27,15 @@ describe("stable document nonce (CLM mode)", () => {
 		const perRender = renderContextDocument(grown, { revision: 0, protectedIndexes: new Set() });
 		assert.notEqual(perRender.documentId, b.documentId, "without a seed the nonce is per render, as before");
 	});
-	test("a document whose metadata line carries an older baseline is still accepted", () => {
+	test("a document whose metadata line carries an older baseline is rejected", () => {
 		const first = renderContextDocument(base, { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
 		const grown = [...base, { role: "user", content: "more", timestamp: 3 } as LiveContextMessage];
 		const current = renderContextDocument(grown, { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
 		// Model copied the first line from an earlier read, then edited a body.
 		const staleMeta = current.text.replace(current.text.split("\n")[0]!, first.text.split("\n")[0]!).replace("working", "done");
 		const result = applyContextDocument(staleMeta, current, clm);
-		assert.equal(result.accepted, true);
-		assert.deepEqual(result.messages[1]!.content, [{ type: "text", text: "done" }]);
+		assert.equal(result.accepted, false);
+		assert.match(result.reason ?? "", /metadata/);
 	});
 	test("rejections name the expected revision and nonce", () => {
 		const current = renderContextDocument(base, { revision: 2, protectedIndexes: new Set(), documentSeed: "s" });
@@ -86,7 +86,7 @@ describe("stable document nonce (CLM mode)", () => {
 		];
 		const snapshot = renderContextDocument(withTool, { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
 		const summary = "# Context Summary\n## Found so far\n- f01: SECRET=42\n<!-- Budget: 20000/20000 -->";
-		const result = applyContextDocument(summary, snapshot, clm);
+		const result = applyContextDocument(`${snapshot.text.split("\n")[0]}\n${summary}`, snapshot, clm);
 		assert.equal(result.accepted, true);
 		assert.equal(result.messages.length, 2);
 		assert.equal(result.messages[0], withTool[0], "task statement kept verbatim");

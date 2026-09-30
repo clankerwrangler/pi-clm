@@ -28,7 +28,7 @@ export interface ContextDocumentSnapshot {
 	blocks: DocumentBlock[];
 }
 
-/** What the context hook rendered for one turn; consumed once by turn_end. */
+/** An immutable context snapshot retained for a bounded number of requests. */
 export interface TurnBaseline {
 	rawMessages: LiveContextMessage[];
 	effectiveMessages: LiveContextMessage[];

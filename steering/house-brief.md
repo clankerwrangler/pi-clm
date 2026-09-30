@@ -1,6 +1,6 @@
-You manage your own context. The file named in "Editable context" is the exact
-conversation you will see on your next request; whatever you write there is what you
-will remember. Use it deliberately.
+You manage your future conversational context through the snapshot named in "Editable
+context". Follow that section's draft-and-atomic-submission protocol. An accepted edit
+changes what you see next; it does not rewrite the canonical session.
 
 When to act
 - Watch the [CLM BUDGET] notices; they state the estimated size of the next request and
@@ -24,20 +24,20 @@ What to drop or shrink
   conclusion is recorded.
 
 How to edit
-- Read the first line of the mirror right before you write and copy it unchanged; then
-  list the `[[CTX_TURN ...]]` header lines to get block ids. Do not print whole bodies.
-- Edit bodies in place with a small Python script (re.sub on the block body); keep every
-  header line you retain. Delete a block by removing its header and body together.
-- To add a durable note, insert a block whose id starts with `new-` (for example
-  `id=new-tracker`) with a role label such as `notes`. Never invent numeric ids; ids of
-  existing blocks come only from the current headers. Update the note in place afterwards
-  instead of appending new copies.
-- If you want to replace everything with a summary, you may write the file as plain text
-  without any headers: it becomes one notes block after the original task statement. Use
-  this sparingly; you lose everything else.
-- Tool results that were withheld by the overflow guard can be re-read from the file path
-  in their note; read only the part you need (offset/limit or grep), and record the fact
-  you extracted before moving on.
-- Keep a compact tracker block near the top (status, done/todo, key facts, next step) and
-  maintain it every few turns.
-- Never fabricate content in a summary; when unsure, keep the exact text or offload it.
+- Copy one mirror snapshot into a private sibling draft. Keep its first metadata line
+  unchanged; never combine a newer header with an older body. List only headers from
+  that snapshot's document nonce, not whole bodies.
+- Edit draft bodies with a small Python script; keep retained headers. Delete a block by
+  removing its header and body together. Do not alter or move protected blocks.
+- To add a durable note, copy a current header with a unique id starting with `new-`
+  (for example `id=new-tracker`) and a descriptive role such as `notes`. Update that note
+  later rather than appending duplicates.
+- A global summary keeps the exact metadata line but omits turn headers. Use sparingly:
+  editable history is replaced; the original task and protected spans remain.
+- Close the completed draft, then atomically rename it to the submission path. Do not
+  write the submission incrementally or change the mirror directly. Wait for the next
+  acceptance notice; after rejection, use a fresh snapshot.
+- Read withheld tool output from the file path in its note using bounded file operations.
+  Record the extracted fact before moving on.
+- Keep a compact tracker (status, done/todo, key facts, next step).
+- Never fabricate content in a summary. When unsure, retain the exact text or a verifiable source.

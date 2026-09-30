@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { applyOverflowGuard, overflowGuardFromEnv, overflowGuardLimit, overflowNoticeText } from "../overflow.ts";
+import { applyOverflowGuard, overflowGuardFromEnv, overflowGuardLimit, overflowNoticeText, saveWithheldText } from "../overflow.ts";
 import type { LiveContextMessage } from "../types.ts";
 
 const estimate = (messages: LiveContextMessage[]) =>
@@ -76,5 +76,45 @@ describe("overflow guard", () => {
 		assert.doesNotMatch(text, /still over/);
 		const stillOver = applyOverflowGuard([user, tool("b", 4000), { role: "user", content: "y".repeat(10_000), timestamp: 2 }], { limit: 500, fixedTokens: 0, estimate });
 		assert.match(overflowNoticeText(stillOver, 500), /still over the limit; edit your context now/);
+	});
+});
+
+
+describe("durable overflow artifacts", () => {
+	test("content hashes avoid tool-ID collisions and reuse unchanged files without replacing them", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-clm-durable-"));
+		try {
+			const first = tool("a/b", 4000);
+			const second = tool("a_b", 5000);
+			const result = applyOverflowGuard([first, second], { limit: 0, fixedTokens: 0, estimate, saveDirectory: dir });
+			assert.equal(result.withheld.length, 2);
+			const [a, b] = result.withheld.map((record) => record.file!);
+			assert.notEqual(a, b);
+			assert.equal(readFileSync(a, "utf8"), "x".repeat(4000));
+			assert.equal(readFileSync(b, "utf8"), "x".repeat(5000));
+			const before = statSync(a);
+			assert.equal(saveWithheldText(dir, "x".repeat(4000)), a);
+			assert.equal(statSync(a).ino, before.ino);
+			assert.equal(statSync(a).mtimeMs, before.mtimeMs);
+			if (process.platform !== "win32") assert.equal(statSync(a).mode & 0o777, 0o600);
+		} finally { rmSync(dir, { recursive: true, force: true }); }
+	});
+	test("corrupt or symlink artifacts and unwritable storage leave source visible", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-clm-corrupt-"));
+		try {
+			const message = tool("result", 4000);
+			const file = saveWithheldText(dir, "x".repeat(4000));
+			writeFileSync(file, "corrupt");
+			let result = applyOverflowGuard([message], { limit: 0, fixedTokens: 0, estimate, saveDirectory: dir });
+			assert.equal(result.messages[0], message);
+			assert.equal(result.withheld.length, 0);
+			rmSync(file);
+			const other = join(dir, "target"); writeFileSync(other, "x".repeat(4000)); symlinkSync(other, file);
+			result = applyOverflowGuard([message], { limit: 0, fixedTokens: 0, estimate, saveDirectory: dir });
+			assert.equal(result.messages[0], message);
+			const blocked = join(dir, "file-not-directory"); writeFileSync(blocked, "block");
+			result = applyOverflowGuard([message], { limit: 0, fixedTokens: 0, estimate, saveDirectory: blocked });
+			assert.equal(result.messages[0], message);
+		} finally { rmSync(dir, { recursive: true, force: true }); }
 	});
 });

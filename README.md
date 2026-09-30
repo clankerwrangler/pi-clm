@@ -1,28 +1,28 @@
 # pi-clm
 
-```
-  ____ _     __  __
- / ___| |   |  \/  |     
-| |   | |   | |\/| |
-| |___| |___| |  | |     
- \____|_____|_|  |_|     pi-clm — the agent that manages its own context
-```
+`pi-clm` is a [Pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
+extension for model-managed context. The model edits a local conversation snapshot with
+ordinary file tools, then submits it atomically. Accepted edits change the next request,
+not the canonical session history.
 
-`pi-clm` is a [Pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) extension 
-that lets the agent manage its own context: the language model can generate functions to 
-modify the context (mapped as a file), and the edited version becomes its next input. 
-Check our paper [Context Language Models](https://arxiv.org/pdf/2609.37725) and [research
-codebase](https://github.com/facebookresearch/context-language-models). 
+This independent fork of [lolipopshock/pi-clm](https://github.com/lolipopshock/pi-clm)
+starts from upstream 1.0.0 (`b84a9d7`) and adds asynchronous-safe submissions,
+protected native tool spans, durable overflow files, and Pi 0.99.1 API support.
+The upstream MIT license and history are retained. The project implements ideas from
+[Context Language Models](https://arxiv.org/pdf/2609.37725) and its
+[research codebase](https://github.com/facebookresearch/context-language-models).
 
 ## Install
 
 ```sh
-pi install npm:@lolipopshock/pi-clm
+pi install git:github.com/clankerwrangler/pi-clm
 
-# From source, or to try it for one session without installing:
-pi install git:github.com/lolipopshock/pi-clm
-pi -e git:github.com/lolipopshock/pi-clm
+# Try one session without installing:
+pi -e git:github.com/clankerwrangler/pi-clm
 ```
+
+Tested against Pi 0.99.1. This source-only package is marked private; no fork npm
+release is available. Repository access is required while the source is private.
 
 ## Quick start
 
@@ -42,7 +42,7 @@ zooms the chart, `Enter` opens the selection, `q` closes.
 - [How it works](docs/how-it-works.md) — the mirror, what runs without the model, the panel, safety.
 - [Configuration](docs/configuration.md) — budget, reserve, reminders, guard, steering and the other settings.
 - [Architecture](docs/architecture.md) — the system as implemented, design notes, known limitations.
-- [Development](docs/development.md) — setup, checks, releasing.
+- [Development](docs/development.md) — setup, tests, model checks.
 
 ## Citation
 

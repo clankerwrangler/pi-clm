@@ -165,6 +165,7 @@ function escapeRegExp(value: string): string {
 export interface RenderContextDocumentOptions {
 	revision?: number;
 	protectedIndexes?: Set<number>;
+	additionalProtectedIndexes?: Set<number>;
 	/**
 	 * When set, the document nonce is derived from this seed and the revision instead of
 	 * the rendered baseline, so it stays constant between accepted edits even as new
@@ -179,7 +180,11 @@ export function renderContextDocument(
 	options: RenderContextDocumentOptions = {},
 ): ContextDocumentSnapshot {
 	const revision = options.revision ?? 0;
-	const protectedIndexes = options.protectedIndexes ?? selectProtectedMessageIndexes(messages);
+	const protectedIndexes = new Set([
+		...(options.protectedIndexes ?? selectProtectedMessageIndexes(messages)),
+		...(options.additionalProtectedIndexes ?? []),
+		...intrinsicProtectedIndexes(messages),
+	]);
 	const baselineDigest = digestMessages(messages);
 	const stable = options.documentSeed !== undefined;
 	const currentDocumentId = documentId(stable ? `seed:${options.documentSeed}` : baselineDigest, revision);
@@ -335,69 +340,81 @@ function changedMessage(source: LiveContextMessage, body: string, requestedRole:
 	return contextNote(body, source, labelRole ? requestedRole : undefined);
 }
 
-function repairToolGroups(messages: LiveContextMessage[]): LiveContextMessage[] {
-	const repaired = [...messages];
-
-	for (let index = 0; index < repaired.length; index++) {
-		const message = repaired[index];
-		if (message.role !== "assistant") continue;
+/** Unknown content and incomplete native spans are not editable text. IDs, not adjacency, join spans. */
+export function intrinsicProtectedIndexes(messages: LiveContextMessage[]): Set<number> {
+	const protectedIndexes = new Set<number>();
+	const results = new Map<string, number[]>();
+	const calls = new Map<string, number[]>();
+	for (const [index, message] of messages.entries()) {
+		for (const id of toolCallIds(message)) calls.set(id, [...(calls.get(id) ?? []), index]);
+		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+			results.set(message.toolCallId, [...(results.get(message.toolCallId) ?? []), index]);
+		}
+		const knownRole = ["user", "assistant", "toolResult", "bashExecution"].includes(message.role) ||
+			(message.role === "custom" && message.customType === "live-context-projection");
+		const opaqueContent = Array.isArray(message.content) && message.content.some((part) => {
+			if (!part || typeof part !== "object") return true;
+			const block = part as Record<string, unknown>;
+			const allowed = block.type === "text" ? ["type", "text"] :
+				block.type === "toolCall" ? ["type", "id", "name", "arguments"] : [];
+			return allowed.length === 0 || Object.keys(block).some((key) => !allowed.includes(key));
+		});
+		if (!knownRole || opaqueContent || message.deferred || message.stopReason === "pending" || message.stopReason === "deferred") {
+			protectedIndexes.add(index);
+		}
+	}
+	for (const [index, message] of messages.entries()) {
 		const ids = toolCallIds(message);
 		if (ids.size === 0) continue;
-
-		const resultIds = new Set<string>();
-		let cursor = index + 1;
-		while (cursor < repaired.length && repaired[cursor].role === "toolResult") {
-			const resultId = repaired[cursor].toolCallId;
-			if (typeof resultId === "string" && ids.has(resultId)) resultIds.add(resultId);
-			cursor++;
+		const incomplete = [...ids].some((id) => calls.get(id)?.length !== 1 || results.get(id)?.length !== 1 || results.get(id)![0] < index);
+		const opaque = protectedIndexes.has(index) || [...ids].some((id) => results.get(id)?.some((i) => protectedIndexes.has(i)));
+		if (incomplete || opaque) {
+			protectedIndexes.add(index);
+			for (const id of ids) for (const i of results.get(id) ?? []) protectedIndexes.add(i);
 		}
-		const complete = [...ids].every((id) => resultIds.has(id));
-		if (!complete) repaired[index] = contextNote(renderMessage(message), message);
 	}
+	for (const [index, message] of messages.entries()) {
+		if (message.role === "toolResult" && (typeof message.toolCallId !== "string" || !calls.has(message.toolCallId))) protectedIndexes.add(index);
+	}
+	return protectedIndexes;
+}
 
-	for (let index = 0; index < repaired.length; index++) {
-		const message = repaired[index];
-		if (message.role !== "toolResult") continue;
-		let assistantIndex = index - 1;
-		while (assistantIndex >= 0 && repaired[assistantIndex].role === "toolResult") assistantIndex--;
-		const assistant = assistantIndex >= 0 ? repaired[assistantIndex] : undefined;
-		const ids = assistant?.role === "assistant" ? toolCallIds(assistant) : new Set<string>();
-		if (typeof message.toolCallId !== "string" || !ids.has(message.toolCallId)) {
+/** Normalize only complete original spans whose endpoints the edit actually removed or changed. */
+function repairToolGroups(messages: LiveContextMessage[], originals: LiveContextMessage[]): LiveContextMessage[] {
+	const repaired = [...messages];
+	const protectedOriginals = intrinsicProtectedIndexes(originals);
+	const immutable = new Set([...protectedOriginals].map((i) => originals[i]));
+	const resultIndexes = new Map<string, number[]>();
+	for (const [index, message] of messages.entries()) {
+		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+			resultIndexes.set(message.toolCallId, [...(resultIndexes.get(message.toolCallId) ?? []), index]);
+		}
+	}
+	const flattened = new Set<string>();
+	for (const [index, message] of repaired.entries()) {
+		if (message.role !== "assistant" || immutable.has(message)) continue;
+		const ids = toolCallIds(message);
+		if ([...ids].some((id) => !resultIndexes.has(id) || resultIndexes.get(id)!.some((i) => i <= index))) {
+			repaired[index] = contextNote(renderMessage(message), message);
+			for (const id of ids) flattened.add(id);
+		}
+	}
+	const remainingIds = new Set(repaired.flatMap((m) => [...toolCallIds(m)]));
+	for (const [index, message] of repaired.entries()) {
+		if (message.role !== "toolResult" || immutable.has(message)) continue;
+		if (!remainingIds.has(String(message.toolCallId)) || flattened.has(String(message.toolCallId))) {
 			repaired[index] = contextNote(renderMessage(message), message);
 		}
 	}
-
 	return repaired;
 }
 
+/** Outstanding calls are valid. Only results without an earlier call are orphaned. */
 export function hasOrphanToolMessages(messages: LiveContextMessage[]): boolean {
-	for (let index = 0; index < messages.length; index++) {
-		const message = messages[index];
-		if (message.role === "assistant") {
-			const ids = toolCallIds(message);
-			if (ids.size === 0) continue;
-			const found = new Set<string>();
-			let cursor = index + 1;
-			while (cursor < messages.length && messages[cursor].role === "toolResult") {
-				const resultId = messages[cursor].toolCallId;
-				if (typeof resultId === "string" && ids.has(resultId)) found.add(resultId);
-				cursor++;
-			}
-			if ([...ids].some((id) => !found.has(id))) return true;
-		}
-		if (message.role === "toolResult") {
-			let cursor = index - 1;
-			while (cursor >= 0 && messages[cursor].role === "toolResult") cursor--;
-			const assistant = cursor >= 0 ? messages[cursor] : undefined;
-			if (
-				!assistant ||
-				assistant.role !== "assistant" ||
-				typeof message.toolCallId !== "string" ||
-				!toolCallIds(assistant).has(message.toolCallId)
-			) {
-				return true;
-			}
-		}
+	const calls = new Set<string>();
+	for (const message of messages) {
+		for (const id of toolCallIds(message)) calls.add(id);
+		if (message.role === "toolResult" && !calls.has(String(message.toolCallId))) return true;
 	}
 	return false;
 }
@@ -446,9 +463,14 @@ export function applyContextDocument(
 		removedSourceIndexes: Set<number>,
 		diagnostics: string[],
 	): ApplyDocumentResult => {
-		const messages = repairToolGroups(candidate);
-		if (hasOrphanToolMessages(messages)) {
-			return rejected(snapshot, beforeEstimate, "Context edit could not be normalized to legal tool-call structure.");
+		const messages = repairToolGroups(candidate, snapshot.messages);
+		for (const sourceIndex of snapshot.blocks.filter((block) => block.protected).map((block) => block.index)) {
+			const outputIndex = candidateOrigins.findIndex((origin) => origin.sourceIndex === sourceIndex);
+			if (outputIndex < 0 || messages[outputIndex] !== snapshot.messages[sourceIndex] ||
+				candidateOrigins.some((origin, i) => origin.sourceIndex !== undefined &&
+					((origin.sourceIndex < sourceIndex && i > outputIndex) || (origin.sourceIndex > sourceIndex && i < outputIndex)))) {
+				return rejected(snapshot, beforeEstimate, "Edit would change or move a protected native or opaque span.");
+			}
 		}
 		const afterEstimate = estimate(messages);
 		const requireShrink = options.requireShrink ?? options.editingMode !== "clm";
@@ -494,6 +516,21 @@ export function applyContextDocument(
 
 	const parsed = parseDocument(editedText, snapshot);
 	const metadataLine = snapshot.text.split("\n")[0] ?? "";
+	// Submission identifies one exact immutable snapshot, even with a caller-supplied seed.
+	const baselineMatches = parsed.baselineDigest === snapshot.baselineDigest;
+	if (
+		parsed.version !== snapshot.version ||
+		parsed.revision !== snapshot.revision ||
+		parsed.documentId !== snapshot.documentId ||
+		!baselineMatches
+	) {
+		return rejected(
+			snapshot,
+			beforeEstimate,
+			`Mirror metadata does not match the current context revision (expected revision ${snapshot.revision}, document ${snapshot.documentId.slice(0, 12)}…). ` +
+				`The first line must be exactly: ${metadataLine}`,
+		);
+	}
 	// CLM: a file with no current block headers at all is the model replacing its whole
 	// context with free text (the paper's "collapse to a summary" move). Accept it as one
 	// notes block, keeping the first user turn so the task statement survives.
@@ -511,7 +548,7 @@ export function applyContextDocument(
 		const removedSourceIndexes = new Set<number>();
 		const firstUserIndex = snapshot.messages.findIndex((message) => message.role === "user");
 		for (const [index, message] of snapshot.messages.entries()) {
-			if (index === firstUserIndex) {
+			if (index === firstUserIndex || snapshot.blocks[index].protected) {
 				candidate.push(message);
 				candidateOrigins.push({ sourceIndex: index, kind: "kept" });
 			} else {
@@ -526,22 +563,7 @@ export function applyContextDocument(
 				". To edit blocks individually, keep the [[CTX_TURN ...]] headers.",
 		]);
 	}
-	// With a stable document the baseline digest still changes every render (new raw
-	// messages), so only the revision and nonce identify the document the model edited.
-	const baselineMatches = snapshot.stableDocument || parsed.baselineDigest === snapshot.baselineDigest;
-	if (
-		parsed.version !== snapshot.version ||
-		parsed.revision !== snapshot.revision ||
-		parsed.documentId !== snapshot.documentId ||
-		!baselineMatches
-	) {
-		return rejected(
-			snapshot,
-			beforeEstimate,
-			`Mirror metadata does not match the current context revision (expected revision ${snapshot.revision}, document ${snapshot.documentId.slice(0, 12)}…). ` +
-				`The first line must be exactly: ${metadataLine}`,
-		);
-	}
+
 	if (parsed.duplicateIds.length > 0) {
 		return rejected(snapshot, beforeEstimate, `Mirror contains duplicate block IDs: ${parsed.duplicateIds.join(", ")}.`);
 	}

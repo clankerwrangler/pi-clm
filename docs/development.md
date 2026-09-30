@@ -1,43 +1,35 @@
 # Development
 
-Node 22+ and pnpm through corepack. The Pi packages are peer dependencies, provided by
-the Pi installation that loads the extension; the dev dependencies pin one version for
-typechecking and tests.
+Use Node 22+ and pnpm through corepack. Development dependencies pin Pi 0.99.1;
+the loading Pi installation supplies the public SDK at runtime.
 
 ```sh
-corepack pnpm install --frozen-lockfile
-corepack pnpm check      # strict typecheck + tests
+corepack pnpm install --frozen-lockfile --ignore-scripts
+corepack pnpm check   # strict TypeScript check and all tests
 ```
 
-## Running a checkout in Pi
+The tests cover projection validation, native pending/opaque spans, late file submissions,
+conflicts and snapshot expiry, disabled-mode compaction, artifact lifetime and failures,
+public prompt options, helper exposure, settings, and the viewer. Tests do not require
+provider credentials. Local mock lifecycle tests are not evidence of a live provider run.
 
-For one session:
+## Safety models
+
+[spec/README.md](../spec/README.md) documents the finite TLA+ models, checked before the
+corresponding implementation, and their limitations. Run them with TLA+ Tools 1.7.4
+(TLC 2.19); set `TLA_TOOLS_JAR` to the local jar. No model checker is downloaded by tests.
+
+## Try a checkout
 
 ```sh
 pi -e /path/to/pi-clm/index.ts
 ```
 
-Or install the checkout in place, so edits apply on the next `/reload`:
+Do not load multiple versions of pi-clm, or another extension using the same
+`live-context-*` session entry types, in one session. Prefer one context-management
+policy: independently transforming extensions may leave content unmappable and therefore
+protected, and provider-stage transformations are outside this extension's budget view.
 
-```sh
-pi install /path/to/pi-clm
-```
-
-Do not load pi-clm together with the original live-context extension; they share
-session entry types.
-
-## Releasing
-
-1. Set `version` in `package.json` and merge to `main`.
-2. Tag and push the tag:
-
-   ```sh
-   git tag v1.0.0 && git push origin v1.0.0
-   ```
-
-3. The `release` workflow runs the typecheck and tests, refuses a tag that does not match
-   `package.json`, and publishes to npm. It needs the repository secret `NPM_TOKEN`, an
-   npm token allowed to publish `@lolipopshock/pi-clm`.
-
-Users then install with `pi install npm:@lolipopshock/pi-clm`; the tarball is the TypeScript sources
-(Pi loads them directly), the bundled steering brief and the docs.
+This fork is source-only and `private: true`; no npm publication is configured for it.
+Keep upstream attribution and history when contributing. Tests use the public Pi SDK,
+not APIs of another host or context manager.

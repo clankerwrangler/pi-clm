@@ -6,7 +6,7 @@ description: Compact stale conversation history through Pi's private live-contex
 # Live Context Management
 
 Pi's live-context extension places the current model-visible conversation in the mirror
-path named in the `## Live context management` section of the system prompt.
+path named in the `## Editable context` section of the system prompt.
 
 Use the mirror only when a meaningful batch compaction will improve future work. Do not
 compact after every turn.
@@ -15,9 +15,9 @@ compact after every turn.
 
 1. Do **not** print or `cat` the entire mirror. Its contents are already in context.
 2. Preserve the `[[LIVE_CONTEXT ...]]` line and every retained `[[CTX_TURN ...]]` header.
-3. Never try to rewrite a `protected=true` turn; the extension restores it.
-4. Make one batched mirror write in a turn. This is an atomicity rule, **not** a request
-   for one global summary. One write should contain as many independent, localized block
+3. Never rewrite, remove, or move a `protected=true` turn; native/opaque spans remain exact.
+4. Make one batched draft submission. This is an atomicity rule, **not** a request
+   for one global summary. One submission should contain as many independent, localized block
    replacements or removals as the revision needs. Read-only inspection is never counted.
 5. Default to a **surgical revision**: preserve message order and conversational structure,
    leave unrelated blocks unchanged, shorten stale bodies in place, and remove only
@@ -72,62 +72,66 @@ recomputed. Consequences:
 
 ## Recommended method
 
-If exact turn IDs are not already known, print only headers carrying the **current**
-document nonce. Do not use a broad `grep '^\\[\\['`: old tool output or documentation may
-contain header-shaped examples.
+Copy the mirror once to a private sibling draft. Do not edit the mirror itself: another
+request may refresh it while a tool is running. Keep the draft's metadata line unchanged.
+List only headers carrying that draft's document nonce; body text can contain misleading
+header-shaped examples.
 
-```bash
-LIVE_CTX="<mirror path from system prompt>" python3 - <<'PY'
-import os, re
+```python
 from pathlib import Path
+import os, re, tempfile
 
-lines = Path(os.environ["LIVE_CTX"]).read_text().splitlines()
+mirror = Path("<mirror path from system prompt>")
+fd, name = tempfile.mkstemp(prefix=".clm-draft-", dir=mirror.parent)
+draft = Path(name)
+with os.fdopen(fd, "w") as f:
+    f.write(mirror.read_text())
+lines = draft.read_text().splitlines()
 meta = re.fullmatch(r"\[\[LIVE_CONTEXT .* document=([a-f0-9]{64}) baseline=[a-f0-9]{64}\]\]", lines[0])
 if not meta:
     raise SystemExit("invalid live-context metadata")
 doc = meta.group(1)
+print(f"draft: {draft}")
 print(lines[0])
 for line in lines[1:]:
     if line.startswith(f"[[CTX_TURN document={doc} "):
         print(line)
-PY
 ```
 
-The script reads bodies locally but emits only the active metadata/header lines. Then use
-a script that locates blocks by their exact header IDs and replaces or removes them
-without retyping the old body.
+Use the same private draft and exact IDs in the editing script. Replace only intended
+bodies, without printing or retyping their old contents. For example:
 
-```bash
-python3 - <<'PY'
+```python
 from pathlib import Path
-import re
+import os, re
 
-p = Path("<mirror path from system prompt>")
-s = p.read_text()
-
-# Replace one stale turn body while preserving its header.
-turn_id = "<id from an existing CTX_TURN header>"
+draft = Path("<private draft path from the previous step>")
+s = draft.read_text()
+turn_id = "<id from a CTX_TURN header in this draft>"
 summary = "[summary: exact findings, decisions, files, and next action]"
 pattern = rf"(^\[\[CTX_TURN [^\n]* id={re.escape(turn_id)} [^\n]*\]\]\n).*?(?=\n\n\[\[CTX_TURN |\Z)"
 s, count = re.subn(pattern, lambda m: m.group(1) + summary, s, count=1, flags=re.M | re.S)
 if count != 1:
     raise SystemExit(f"turn not found: {turn_id}")
-
-p.write_text(s)
-PY
+draft.write_text(s)  # closes before publication
+os.replace(draft, draft.with_name("LIVE_CONTEXT.commit.md"))
 ```
 
-For a larger compaction, still prefer several local replacements: summarize each stale
-investigation or tool-heavy episode in its original block, retain the surrounding
-user/assistant exchange, and delete only blocks whose value is captured nearby. A single
-script can perform all of these disjoint edits and write the mirror once. Only replace a
-whole span with one comprehensive summary when the user explicitly requested global
-consolidation. Use IDs returned by the nonce-filtered header listing. Do not invent IDs or
-duplicate blocks.
+Apply all disjoint edits before publishing. The next context request claims the complete
+submission; `turn_end` and a successful file write do not imply acceptance. Never write
+the submission incrementally or change it after publication. Submit only one draft at a
+time. The last 16 snapshots remain valid within an accepted revision: intervening context
+reads and appended raw messages are safe, but conflicting edits, branch/model changes,
+reload, or expiry reject the draft. Read a fresh snapshot after rejection.
+
+Prefer several local replacements over flattening unrelated episodes. Retain complete
+exchanges and delete only material whose value is captured nearby. Do not invent existing
+IDs or duplicate blocks. Submissions must be regular files no larger than 16 MiB.
 
 ## Durable continuity annotations
 
-Before removing or rewriting an exact source that later work must revisit, call
+When the optional helper tools are available, before removing or rewriting an exact
+source that later work must revisit, call
 `live_context_annotate` with the source block ID from its current `CTX_TURN` header:
 
 - `pin` keeps a bounded exact textual source visible;

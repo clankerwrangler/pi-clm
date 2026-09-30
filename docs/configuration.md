@@ -19,7 +19,7 @@ Values keep their case (paths), names do not.
 | `reserve`        | generation headroom kept below the budget; the last reminder fires at budget − reserve                            | `2048`, `2k`                                  | `2048`       |
 | `reminders`      | budget fractions at which a `[CLM BUDGET]` note is added to the model's context                                   | `50/75/90%`, `75/90%`, `90%`, `off`           | `50/75/90%`  |
 | `guard`          | overflow guard: above budget − reserve, withhold the oldest tool results                                          | `on`, `off`                                   | `on`         |
-| `compaction`     | Pi's automatic compaction: `auto` pauses it while the guard enforces the budget, `off` always, `on` leaves Pi alone | `auto`, `off`, `on`                          | `auto`       |
+| `compaction`     | Pi's automatic compaction: `auto` pauses it while the guard enforces the budget, `off` pauses automatic compaction, `on` leaves Pi alone | `auto`, `off`, `on`                          | `auto`       |
 | `cap`            | max characters kept per tool result (head + tail)                                                                 | `10k`, `10000`, `10k:0.5` (head fraction), `off` | off       |
 | `steering`       | markdown file with your context-management strategy, appended to the system prompt                                | `house` (the bundled `steering/house-brief.md`), a path, `none` | off |
 | `one-tool`       | paper-harness parity: block every tool call after the first in a turn                                             | `on`, `off`                                   | off          |
@@ -47,8 +47,22 @@ saying which variable is wrong.
 | `PI_CLM_COMPACT_PROMPT`     | a path to a markdown template; `default`, `none` or `off` for the built-in prompt | `compact-prompt` |
 | `PI_CLM_ESTIMATE_FACTOR`    | a number from 1 to 4: the prior for the size calibration (dense data: `2`)        | —               |
 
+## Optional helper exposure
+
+`PI_CLM_TOOL_EXPOSURE=direct` (the default) declares `live_context_annotate` and
+`live_context_recall` as ordinary model tools. `codemode` registers the same helpers for
+programmatic calls through public Pi `ctx.tools` / `ctx.executeTool()` without declaring
+them directly. Invalid values stop extension loading. This is resource-load configuration,
+not a branch setting: restart or reload the extension after changing the environment.
+Embedded callers can pass `toolExposure: "codemode"` to `liveContextExtension` instead.
+
+This option neither discovers tools nor creates skills. Editing and overflow retrieval
+still work with ordinary file tools even if neither helper is exposed by a host.
+
 ## Notes
 
+- **Compaction.** All policies leave Pi untouched while CLM is disabled or the mirror
+  is unavailable. Manual compaction is never cancelled by CLM.
 - **Budget.** The overflow guard acts above `min(budget − reserve, window − 4096 − reserve)`:
   Pi itself clamps the reply length once a request nears the window, so the guard keeps a
   request short of that point even when the budget is larger.
@@ -56,7 +70,7 @@ saying which variable is wrong.
   the provider's own count of each request. Dense content (code, random strings) can be
   twice as many tokens as the estimate; for a run that starts with such data,
   `PI_CLM_ESTIMATE_FACTOR=2` avoids one oversized first request.
-- **Steering.** The harness text stays protocol-only; a steering document is the one place
+- **Steering.** The system guidance stays protocol-only; a steering document is the one place
   for strategy. `/clm settings` shows the document's name and SHA-256 prefix, so an
   experiment can record which brief was used.
 - **Compact prompt.** A template may use `{{mirror}}`, `{{current}}`, `{{budget}}` and

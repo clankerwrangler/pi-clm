@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rename, rm, stat, lstat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -41,11 +41,13 @@ async function sweepStaleMirrors(parentDirectory: string, keepDirectory: string,
 export class MirrorStore {
 	readonly directory: string;
 	readonly filePath: string;
+	readonly submissionPath: string;
 	private disposed = false;
 
 	private constructor(directory: string) {
 		this.directory = directory;
 		this.filePath = join(directory, "LIVE_CONTEXT.md");
+		this.submissionPath = join(directory, "LIVE_CONTEXT.commit.md");
 	}
 
 	static async create(
@@ -80,6 +82,25 @@ export class MirrorStore {
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			throw error;
+		}
+	}
+
+	/** Claim an atomically published candidate; never read a file still being edited. */
+	async readSubmission(): Promise<string | undefined> {
+		if (this.disposed) return undefined;
+		const claimed = join(this.directory, `.submission-${randomUUID()}`);
+		try {
+			await rename(this.submissionPath, claimed);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
+		try {
+			const info = await lstat(claimed);
+			if (!info.isFile() || info.size > 16 * 1024 * 1024) throw new Error("Submission must be a regular file of at most 16 MiB.");
+			return await readFile(claimed, "utf8");
+		} finally {
+			await rm(claimed, { force: true });
 		}
 	}
 
