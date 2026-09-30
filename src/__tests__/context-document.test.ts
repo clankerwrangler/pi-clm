@@ -3,9 +3,11 @@ import { describe, test } from "node:test";
 
 import {
 	applyContextDocument,
+	intrinsicProtectedIndexes,
 	hasOrphanToolMessages,
 	renderContextDocument,
 } from "../context-document.ts";
+import { signedToolResult } from "./fixtures/signed-tool-result.ts";
 import type { ContextDocumentSnapshot, LiveContextMessage } from "../types.ts";
 
 function toolCall(id: string, command: string) {
@@ -433,4 +435,59 @@ describe("native pending and opaque spans", () => {
 		assert.equal(result.accepted, false);
 		assert.match(result.reason ?? "", /protected native or opaque span/);
 	});
+});
+
+
+describe("signed completed calls with editable result bodies", () => {
+	function fixture() {
+		const { assistant, result } = signedToolResult();
+		const messages = [{ role: "user", content: "Summarize the output.", timestamp: 1 }, assistant, result] as unknown as LiveContextMessage[];
+		return { assistant, result, messages };
+	}
+	test("public Responses reasoning/signatures stay exact while a completed text body shrinks", () => {
+		const { assistant, result, messages } = fixture();
+		const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
+		assert.equal(snapshot.blocks[1].protected, true);
+		assert.equal(snapshot.blocks[2].protected, false);
+		const applied = applyContextDocument(replaceBody(snapshot, 2, "[summary: completed result]"), snapshot, { editingMode: "clm" });
+		assert.equal(applied.accepted, true, applied.reason);
+		assert.ok(applied.afterEstimate < applied.beforeEstimate / 10);
+		assert.equal(applied.messages[1], assistant);
+		assert.deepEqual(applied.messages[2], { ...result, content: [{ type: "text", text: "[summary: completed result]" }] });
+		assert.equal(applied.messages[2].details, result.details);
+		assert.equal(hasOrphanToolMessages(applied.messages), false);
+	});
+
+	for (const invalid of ["delete", "role", "invert", "reorder", "headerless"] as const) {
+		test(`body-only completed results reject ${invalid}`, () => {
+			const { messages } = fixture();
+			if (invalid === "reorder") messages.push({ role: "assistant", content: [{ type: "text", text: "later unrelated work" }], timestamp: 4 });
+			const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
+			const edit = invalid === "delete" ? deleteBlock(snapshot, 2) : invalid === "role" ? snapshot.text.replace("role=toolResult", "role=notes") :
+				invalid === "headerless" ? snapshot.text.split("\n")[0] + "\nsummary" :
+				snapshot.text.split("[[CTX_TURN")[0] + (invalid === "reorder" ? [snapshot.blocks[0], snapshot.blocks[1], snapshot.blocks[3], snapshot.blocks[2]] : [snapshot.blocks[0], snapshot.blocks[2], snapshot.blocks[1]]).map((block) => `${block.header}\n${block.body}`).join("\n\n");
+			const applied = applyContextDocument(edit, snapshot, { editingMode: "clm" });
+			assert.equal(applied.accepted, false);
+			assert.match(applied.reason ?? "", /body-only|protected native/);
+			assert.deepEqual(applied.messages, messages);
+		});
+	}
+
+	for (const blocked of ["pending", "partial", "ambiguous", "opaque result", "unmapped result", "unknown assistant"] as const) {
+		test(`${blocked} stays fully exact instead of exposing a result body`, () => {
+			const { messages } = fixture();
+			const required = new Set<number>();
+			if (blocked === "pending") messages[1].stopReason = "pending";
+			else if (blocked === "partial") (messages[1].content as any[]).push(toolCall("unfinished", "work"));
+			else if (blocked === "ambiguous") (messages[1].content as any[]).push((messages[1].content as any[]).at(-1));
+			else if (blocked === "opaque result") (messages[2].content as any[]).push({ type: "image", mimeType: "image/png", data: "opaque" });
+			else if (blocked === "unmapped result") required.add(2);
+			else (messages[1].content as any[]).push({ type: "unknownProviderContent", data: "opaque" });
+			const protectedIndexes = intrinsicProtectedIndexes(messages, required);
+			assert.ok(protectedIndexes.has(1)); assert.ok(protectedIndexes.has(2));
+			const snapshot = renderContextDocument(messages, { protectedIndexes: required });
+			const applied = applyContextDocument(replaceBody(snapshot, 2, "short"), snapshot, { editingMode: "clm" });
+			assert.equal(applied.messages[1], messages[1]); assert.equal(applied.messages[2], messages[2]);
+		});
+	}
 });

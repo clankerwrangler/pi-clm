@@ -59,12 +59,19 @@ inside a custom projection message, never provider system instructions.
 
 Protection is conservative:
 
-- Source content not exactly mapped to public session messages or an accepted projection
-  is protected. Another extension's transformed or opaque content is not reverse-engineered.
+- Content not exactly mapped to public session messages or an accepted projection is
+  protected. A public-shaped assistant may be unmapped while its independently mapped
+  completed result remains body-editable. The entire assistant still stays exact; no
+  transformed or opaque content is reverse-engineered.
 - Pending, incomplete, ambiguous, and orphan native call/result spans are preserved exactly.
   Calls and results need not be adjacent; groups are matched globally by native call ID.
-- Unknown roles, unknown content blocks, signed metadata, and non-text content are protected.
-  Protection propagates across related native endpoints.
+- Unknown roles/blocks, incomplete or ambiguous groups, and opaque/unmapped results stay
+  protected with their related native endpoints. Recognized public SDK signed assistant
+  blocks remain exact without freezing uniquely matched, completed, mapped text-result bodies.
+- Such results retain their native role, call ID, tool name, metadata, and valid order.
+  Only text content changes; deletion, role changes, or inversions are rejected. This rule
+  also governs observation caps and withholding. Headerless rewrites cannot remove these
+  required result envelopes; use a block-body edit instead.
 - Protected blocks cannot disappear or move across retained source blocks. Body edits are
   restored to the original source. A conflicting ordering is rejected.
 

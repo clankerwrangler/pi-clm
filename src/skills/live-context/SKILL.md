@@ -16,6 +16,9 @@ compact after every turn.
 1. Do **not** print or `cat` the entire mirror. Its contents are already in context.
 2. Preserve the `[[LIVE_CONTEXT ...]]` line and every retained `[[CTX_TURN ...]]` header.
 3. Never rewrite, remove, or move a `protected=true` turn; native/opaque spans remain exact.
+   A completed text result paired with a protected call permits body-only edits: keep its
+   header, role, and source order after the call. Do not delete it or replace it with a global
+   summary; shorten its body instead.
 4. Make one batched draft submission. This is an atomicity rule, **not** a request
    for one global summary. One submission should contain as many independent, localized block
    replacements or removals as the revision needs. Read-only inspection is never counted.

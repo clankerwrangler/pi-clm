@@ -89,6 +89,9 @@ are unchanged. Unrelated requests and appended messages do not invalidate a draf
 Conflicting edits, branch changes, model changes, or expired snapshots are rejected;
 read the current mirror and submit a new draft after rejection.
 Protected native pending calls/results and opaque content remain exact. Do not move them.
+A completed plain-text result paired with a protected call permits body-only edits: keep
+its header/role and source order after the call. Deletion or a global summary that removes
+that result is rejected; shrink its body instead.
 ${editingMode === "clm" ? `Edit, delete, reorder, or add editable blocks. To add a block, copy a current header,
 use a unique id=new-NAME, protected=false, and a role label such as notes. To replace
 editable history with a summary, keep only the metadata line followed by your summary;

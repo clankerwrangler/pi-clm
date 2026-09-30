@@ -180,11 +180,10 @@ export function renderContextDocument(
 	options: RenderContextDocumentOptions = {},
 ): ContextDocumentSnapshot {
 	const revision = options.revision ?? 0;
-	const protectedIndexes = new Set([
+	const protectedIndexes = intrinsicProtectedIndexes(messages, new Set([
 		...(options.protectedIndexes ?? selectProtectedMessageIndexes(messages)),
 		...(options.additionalProtectedIndexes ?? []),
-		...intrinsicProtectedIndexes(messages),
-	]);
+	]));
 	const baselineDigest = digestMessages(messages);
 	const stable = options.documentSeed !== undefined;
 	const currentDocumentId = documentId(stable ? `seed:${options.documentSeed}` : baselineDigest, revision);
@@ -208,7 +207,7 @@ export function renderContextDocument(
 	const renderedBlocks = blocks.map((block) => `${block.header}\n${block.body}`);
 	const text = [
 		`[[LIVE_CONTEXT version=${DOCUMENT_VERSION} revision=${revision} document=${currentDocumentId} baseline=${baselineDigest}]]`,
-		"# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact.",
+		"# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact. Results paired with protected calls permit body-only edits.",
 		...renderedBlocks,
 	].join("\n\n");
 
@@ -340,9 +339,23 @@ function changedMessage(source: LiveContextMessage, body: string, requestedRole:
 	return contextNote(body, source, labelRole ? requestedRole : undefined);
 }
 
-/** Unknown content and incomplete native spans are not editable text. IDs, not adjacency, join spans. */
-export function intrinsicProtectedIndexes(messages: LiveContextMessage[]): Set<number> {
-	const protectedIndexes = new Set<number>();
+/** Only these public SDK assistant blocks can carry an exact envelope around an editable result. */
+function knownAssistantContent(message: LiveContextMessage): boolean {
+	return Array.isArray(message.content) && message.content.every((part) => {
+		if (!part || typeof part !== "object") return false;
+		const block = part as Record<string, unknown>;
+		const allowed = block.type === "text" ? ["type", "text", "textSignature"] :
+			block.type === "thinking" ? ["type", "thinking", "thinkingSignature", "redacted"] :
+			block.type === "toolCall" ? ["type", "id", "name", "arguments", "thoughtSignature", "namespace"] : [];
+		return allowed.length > 0 && Object.keys(block).every((key) => allowed.includes(key));
+	});
+}
+
+/** Unknown content and incomplete native spans stay exact; signed complete calls permit text-result bodies. */
+export function intrinsicProtectedIndexes(messages: LiveContextMessage[], required = new Set<number>()): Set<number> {
+	const protectedIndexes = new Set(required);
+	// A public-shaped assistant can stay exact without freezing a separately mapped result body.
+	const fullGroup = new Set([...required].filter((index) => messages[index]?.role !== "assistant" || !knownAssistantContent(messages[index])));
 	const results = new Map<string, number[]>();
 	const calls = new Map<string, number[]>();
 	for (const [index, message] of messages.entries()) {
@@ -359,15 +372,27 @@ export function intrinsicProtectedIndexes(messages: LiveContextMessage[]): Set<n
 				block.type === "toolCall" ? ["type", "id", "name", "arguments"] : [];
 			return allowed.length === 0 || Object.keys(block).some((key) => !allowed.includes(key));
 		});
-		if (!knownRole || opaqueContent || message.deferred || message.stopReason === "pending" || message.stopReason === "deferred") {
+		const nonTextResult = message.role === "toolResult" && (!Array.isArray(message.content) || message.content.some((part) => {
+			if (!part || typeof part !== "object") return true;
+			const block = part as Record<string, unknown>;
+			return block.type !== "text" || typeof block.text !== "string" || Object.keys(block).some((key) => !["type", "text"].includes(key));
+		}));
+		const pending = message.deferred || message.stopReason === "pending" || message.stopReason === "deferred";
+		if (!knownRole || opaqueContent || nonTextResult || pending) {
 			protectedIndexes.add(index);
+			if (!knownRole || nonTextResult || pending || message.role !== "assistant" || !knownAssistantContent(message)) fullGroup.add(index);
+		}
+		// Duplicate native IDs inside one assistant message are ambiguous too.
+		if (Array.isArray(message.content)) {
+			const nativeCalls = message.content.filter((part) => part && typeof part === "object" && (part as { type?: unknown }).type === "toolCall");
+			if (nativeCalls.length > toolCallIds(message).size) fullGroup.add(index);
 		}
 	}
 	for (const [index, message] of messages.entries()) {
 		const ids = toolCallIds(message);
 		if (ids.size === 0) continue;
 		const incomplete = [...ids].some((id) => calls.get(id)?.length !== 1 || results.get(id)?.length !== 1 || results.get(id)![0] < index);
-		const opaque = protectedIndexes.has(index) || [...ids].some((id) => results.get(id)?.some((i) => protectedIndexes.has(i)));
+		const opaque = fullGroup.has(index) || [...ids].some((id) => results.get(id)?.some((i) => protectedIndexes.has(i)));
 		if (incomplete || opaque) {
 			protectedIndexes.add(index);
 			for (const id of ids) for (const i of results.get(id) ?? []) protectedIndexes.add(i);
@@ -377,6 +402,13 @@ export function intrinsicProtectedIndexes(messages: LiveContextMessage[]): Set<n
 		if (message.role === "toolResult" && (typeof message.toolCallId !== "string" || !calls.has(message.toolCallId))) protectedIndexes.add(index);
 	}
 	return protectedIndexes;
+}
+
+/** Complete text results paired with an exact assistant may change bodies, never their native envelopes. */
+function bodyOnlyResultIndexes(snapshot: ContextDocumentSnapshot): Set<number> {
+	const exactCalls = new Set(snapshot.blocks.filter((block) => block.protected).flatMap((block) => [...toolCallIds(block.source)]));
+	return new Set(snapshot.blocks.filter((block) => !block.protected && block.source.role === "toolResult" &&
+		exactCalls.has(String(block.source.toolCallId))).map((block) => block.index));
 }
 
 /** Normalize only complete original spans whose endpoints the edit actually removed or changed. */
@@ -445,6 +477,7 @@ export function applyContextDocument(
 	const estimate = options.estimate ?? estimateContextCharacters;
 	const estimateUnit = options.estimateUnit ?? "characters";
 	const beforeEstimate = estimate(snapshot.messages);
+	const bodyOnly = bodyOnlyResultIndexes(snapshot);
 	if (editedText.trim() === snapshot.text.trim()) {
 		return {
 			accepted: true,
@@ -464,6 +497,16 @@ export function applyContextDocument(
 		diagnostics: string[],
 	): ApplyDocumentResult => {
 		const messages = repairToolGroups(candidate, snapshot.messages);
+		for (const sourceIndex of bodyOnly) {
+			const outputIndex = candidateOrigins.findIndex((origin) => origin.sourceIndex === sourceIndex);
+			const source = snapshot.messages[sourceIndex];
+			const output = messages[outputIndex];
+			if (!output || canonicalMessage({ ...source, content: undefined }) !== canonicalMessage({ ...output, content: undefined }) ||
+				candidateOrigins.some((origin, i) => origin.sourceIndex !== undefined &&
+					((origin.sourceIndex < sourceIndex && i > outputIndex) || (origin.sourceIndex > sourceIndex && i < outputIndex)))) {
+				return rejected(snapshot, beforeEstimate, "A completed result paired with a protected call permits body-only edits; keep its native role, identity, metadata, and source order.");
+			}
+		}
 		for (const sourceIndex of snapshot.blocks.filter((block) => block.protected).map((block) => block.index)) {
 			const outputIndex = candidateOrigins.findIndex((origin) => origin.sourceIndex === sourceIndex);
 			if (outputIndex < 0 || messages[outputIndex] !== snapshot.messages[sourceIndex] ||
@@ -624,6 +667,9 @@ export function applyContextDocument(
 			if (restored) diagnostics.push(`Restored protected turn ${sourceBlock.index + 1}.`);
 			continue;
 		}
+		if (bodyOnly.has(sourceBlock.index) && (!parsedBlock?.body || parsedBlock.role !== sourceBlock.role)) {
+			return rejected(snapshot, beforeEstimate, "A completed result paired with a protected call permits body-only edits; do not delete it or change its role.");
+		}
 		if (!parsedBlock || !parsedBlock.body) {
 			removedSourceIndexes.add(sourceBlock.index);
 			continue;
@@ -636,7 +682,9 @@ export function applyContextDocument(
 			candidate.push(sourceBlock.source);
 			candidateOrigins.push({ sourceIndex: sourceBlock.index, kind: "kept" });
 		} else {
-			candidate.push(changedMessage(sourceBlock.source, bodyText(parsedBlock.body, snapshot), parsedBlock.role, options.editingMode === "clm"));
+			candidate.push(bodyOnly.has(sourceBlock.index)
+				? { ...sourceBlock.source, content: [{ type: "text", text: bodyText(parsedBlock.body, snapshot) }] }
+				: changedMessage(sourceBlock.source, bodyText(parsedBlock.body, snapshot), parsedBlock.role, options.editingMode === "clm"));
 			candidateOrigins.push({ sourceIndex: sourceBlock.index, kind: "edited" });
 		}
 	}

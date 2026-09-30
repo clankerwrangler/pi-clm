@@ -1377,7 +1377,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const unmapped = new Set(effectiveMessages.flatMap((message, index) =>
 			owned.has(canonicalMessage(message)) ? [] : [index],
 		));
-		const protectedContent = new Set([...unmapped, ...intrinsicProtectedIndexes(effectiveMessages)]);
+		const protectedContent = intrinsicProtectedIndexes(effectiveMessages, unmapped);
 		if (editingMode === "clm") {
 			const capped = capObservations(effectiveMessages, observationCap);
 			effectiveMessages = effectiveMessages.map((message, index) => protectedContent.has(index) ? message : capped[index]);

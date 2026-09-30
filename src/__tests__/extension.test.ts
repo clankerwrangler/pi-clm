@@ -15,6 +15,7 @@ import {
 	PROJECTION_PREFIX_MISMATCH_REASON,
 } from "../projection.ts";
 import { LIVE_CONTEXT_STATE } from "../state.ts";
+import { signedToolResult } from "./fixtures/signed-tool-result.ts";
 import type { LiveContextMessage } from "../types.ts";
 
 type Handler = (event: any, ctx: any) => any;
@@ -1821,3 +1822,47 @@ test("persisted overflow links survive mirror deletion, resume, and same-host br
 		await rm(directory, { recursive: true, force: true });
 	}
 });
+
+
+for (const sourceMapping of ["mapped", "unmapped assistant", "unmapped result"] as const) for (const transform of ["edit", "cap", "overflow"] as const) {
+	test(`${sourceMapping}: signed complete text result ${transform} respects source and envelope boundaries`, async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm",
+			...(transform === "cap" ? { observationCap: { maxCharacters: 200 } } : {}),
+			...(transform === "overflow" ? { budget: { contextBudget: 2000, reserve: 0 } } : { overflow: { mode: "off" } }),
+		});
+		await emit(harness, "session_start", {});
+		try {
+			let { assistant, result } = signedToolResult();
+			let raw = [{ role: "user", content: "Summarize the output.", timestamp: 1 }, assistant, result];
+			let response = (await emit(harness, "context", { messages: raw }))[0];
+			if (sourceMapping === "unmapped assistant") {
+				assistant = structuredClone(assistant);
+				(assistant.content[0] as { thinkingSignature: string }).thinkingSignature = "different opaque public signature";
+				raw = [raw[0], assistant, result];
+				response = (await emit(harness, "context", { messages: raw, persistSources: false }))[0];
+			} else if (sourceMapping === "unmapped result") {
+				result = { ...result, content: [{ type: "text", text: "transformed source\n".repeat(10_000) }] };
+				raw = [raw[0], assistant, result];
+				response = (await emit(harness, "context", { messages: raw, persistSources: false }))[0];
+			}
+			if (transform === "edit") {
+				const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+				const path = before[0].systemPrompt.match(/mirrored at `([^`]+)`/)[1] as string;
+				const document = await readFile(path, "utf8");
+				const edited = document.replace(/(\[\[CTX_TURN document=[a-f0-9]{64} index=3 role=toolResult[^\n]*\]\]\n)[\s\S]*$/, "$1[summary: completed text output]");
+				await submit(path, edited);
+				response = (await nextRequest(harness))[0];
+			}
+			assert.deepEqual(response.messages[1], assistant);
+			const visible = response.messages[2];
+			assert.deepEqual({ ...visible, content: result.content }, result);
+			if (sourceMapping === "unmapped result") assert.deepEqual(visible, result);
+			else assert.ok(JSON.stringify(visible.content).length < JSON.stringify(result.content).length / 10);
+			if (transform === "overflow" && sourceMapping !== "unmapped result") {
+				const file = /Full text: (.+)$/.exec(visible.content[0].text)![1];
+				assert.equal(await readFile(file, "utf8"), (result.content[0] as { text: string }).text);
+			}
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+}

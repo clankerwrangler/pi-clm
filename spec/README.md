@@ -57,3 +57,22 @@ From `spec/`:
 java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
   -config NativeOrder.cfg NativeOrder.tla
 ```
+
+## Completed native result bodies
+
+`NativeBody.tla` separates a completed mapped text body from the exact native envelope
+and signed assistant. It also covers an unmapped assistant whose blocks have recognized
+public SDK shapes: that assistant remains exact while a separately mapped result body
+can shrink. Pending, partial, ambiguous, unknown-block, opaque-result, and unmapped-result
+cases remain fully exact. Body edits, caps, and withholding preserve identity, metadata,
+and order; deleting or changing an envelope is refused. The refined model was checked
+before the corresponding change: 968 generated states, 96 distinct, no invariant violations.
+This finite model abstracts the block classification; realistic public-SDK fixture tests
+check classification, smaller accepted bodies, caps, withholding, and rejected edits.
+
+From `spec/`:
+
+```sh
+java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
+  -config NativeBody.cfg NativeBody.tla
+```

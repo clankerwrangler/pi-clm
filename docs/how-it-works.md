@@ -43,7 +43,11 @@ protected blocks. New blocks use `id=new-…`; their role labels are descriptive
 system-message authority. A global summary retains the exact metadata line but omits all
 turn headers; the original task and protected native/opaque spans remain. Pending calls,
 ambiguous native groups, and content not safely mapped to public session sources cannot
-be edited or discarded. Signed and unknown content is preserved rather than guessed at.
+be edited or discarded. Signed and unknown content is preserved rather than guessed at. A completed mapped
+plain-text result paired with a protected signed call can still shrink: edit only its
+body, keeping its header, native role, and source order after the call. Deleting or relabeling
+that result is rejected, including a global summary that would remove it. Caps and
+withholding follow the same rule and preserve its native envelope and metadata.
 
 ## What runs without the model
 
