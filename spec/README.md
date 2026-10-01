@@ -7,7 +7,7 @@ implementation and integration tests cover those boundaries separately.
 From `spec/`, set `TLA_TOOLS_JAR` to the local TLA+ tools jar:
 
 ```sh
-for model in ProjectionEditing ContextSafety ToolExposure; do
+for model in ProjectionEditing ContextSafety ToolExposure Maintenance; do
   java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
     -config "$model.cfg" "$model.tla"
 done
@@ -46,6 +46,16 @@ The bounded instance has two context-read generations and at most two accepted o
 invalidated revisions: **56,811 generated / 6,276 distinct states**, no violations.
 TypeScript tests cover the actual metadata/source guards, 16-snapshot expiry, late
 submissions, failure injection, persistence, and file lifetime.
+
+## Maintenance command
+
+`Maintenance.tla` models the compact command waiting for idle, an idle-race follow-up,
+stale-context cancellation, one custom-message delivery and prepared model request,
+then ordinary user input on the same session. The generated message cannot enter user
+admission or acquire user provenance. Duplicate commands while waiting are inert.
+**60 generated / 23 distinct states**, no violations. This finite transition model does
+not prove runtime scheduling or rendering; registered-command and rendering integration
+tests check those boundaries separately.
 
 ## Optional helper exposure
 

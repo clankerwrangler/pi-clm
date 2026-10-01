@@ -1010,8 +1010,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	}
 
 	/**
-	 * `/clm-compact [instructions]`: send the (configurable) compaction prompt as a user
-	 * message. The model submits a completed draft for validation before the next request.
+	 * `/clm-compact [instructions]`: send a labeled extension maintenance message.
+	 * The model submits a completed draft for validation before the next request.
 	 */
 	async function compactCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
 		if (compactPending) {
@@ -1056,7 +1056,12 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			const current = next ?? observed ?? estimateRequestTokens(ctx, effective ?? []);
 			const prompt = buildCompactPrompt(template, { mirror: activeStore.filePath, current, budget, instructions: args });
 			try {
-				pi.sendUserMessage(prompt, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+				pi.sendMessage({
+					customType: "clm-maintenance",
+					content: `[CLM maintenance]\n\n${prompt}`,
+					display: true,
+					details: { source: "pi-clm", command: `${commandName}-compact` },
+				}, { triggerTurn: true, ...(ctx.isIdle() ? {} : { deliverAs: "followUp" }) });
 			} catch (error) {
 				ctx.ui.notify(`/clm-compact was not sent: ${error instanceof Error ? error.message : String(error)}`, "warning");
 				return;

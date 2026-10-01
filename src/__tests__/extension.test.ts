@@ -29,8 +29,8 @@ type Harness = {
 	branch: any[];
 	notifications: string[];
 	statuses: Map<string, string | undefined>;
-	/** `pi.sendUserMessage` calls. */
-	sentUserMessages: Array<{ content: unknown; options?: unknown }>;
+	/** `pi.sendMessage` calls. */
+	sentMessages: Array<{ customType: string; content: unknown; display: boolean; details?: unknown; options?: unknown }>;
 	ctx: any;
 	lastContext?: any;
 	setUsage(percent: number | undefined): void;
@@ -56,7 +56,7 @@ function createHarness(initialBranch: any[] = []): Harness {
 	let usagePercent: number | undefined;
 	const notifications: string[] = [];
 	const statuses = new Map<string, string | undefined>();
-	const sentUserMessages: Array<{ content: unknown; options?: unknown }> = [];
+	const sentMessages: Array<{ customType: string; content: unknown; display: boolean; details?: unknown; options?: unknown }> = [];
 
 	const pi = {
 		on(name: string, handler: Handler) {
@@ -78,8 +78,8 @@ function createHarness(initialBranch: any[] = []): Harness {
 				data,
 			});
 		},
-		sendUserMessage(content: unknown, options?: unknown) {
-			sentUserMessages.push({ content, options });
+		sendMessage(message: { customType: string; content: unknown; display: boolean; details?: unknown }, options?: unknown) {
+			sentMessages.push({ ...message, options });
 		},
 	} as unknown as ExtensionAPI;
 
@@ -121,7 +121,7 @@ function createHarness(initialBranch: any[] = []): Harness {
 		branch,
 		notifications,
 		statuses,
-		sentUserMessages,
+		sentMessages,
 		ctx,
 		setUsage(percent: number | undefined) {
 			usagePercent = percent;
@@ -1458,30 +1458,33 @@ describe("pi-clm entry point", () => {
 			assert.ok(harness.commands.has("clm-compact"), "a top-level command, so completion lists it beside Pi's /compact");
 			await compact("");
 			assert.match(harness.notifications.at(-1)!, /Nothing to compact yet/);
-			assert.equal(harness.sentUserMessages.length, 0);
+			assert.equal(harness.sentMessages.length, 0);
 
 			await emit(harness, "context", { messages: [{ role: "user", content: "x".repeat(40_000), timestamp: 1 }] });
 			await harness.commands.get("clm").handler("path", harness.ctx);
 			const mirror = harness.notifications.at(-1)!;
 			await compact("");
-			const sent = harness.sentUserMessages.at(-1)!;
-			assert.equal(sent.options, undefined, "idle: sent now");
+			const sent = harness.sentMessages.at(-1)!;
+			assert.deepEqual(sent.options, { triggerTurn: true }, "idle: one maintenance turn");
+			assert.equal(sent.customType, "clm-maintenance");
+			assert.equal(sent.display, true);
+			assert.deepEqual(sent.details, { source: "pi-clm", command: "clm-compact" });
 			const prompt = String(sent.content);
-			assert.match(prompt, /^Compact your live context now\./);
+			assert.match(prompt, /^\[CLM maintenance\]\n\nCompact your live context now\./);
 			assert.ok(prompt.includes(`about 10k tokens (budget 100k). Your context is mirrored at \`${mirror}\``), prompt);
 			assert.doesNotMatch(prompt, /\{\{|Also:/);
 			assert.match(harness.notifications.at(-1)!, /Asked the model to compact its context \(now about 10k tokens\)/);
 
 			await compact("keep the PR numbers");
-			assert.match(String(harness.sentUserMessages.at(-1)!.content), /\n\nAlso: keep the PR numbers\n\n/);
+			assert.match(String(harness.sentMessages.at(-1)!.content), /\n\nAlso: keep the PR numbers\n\n/);
 
 			// Busy: say so, wait for the run to finish, then send.
 			harness.ctx.isIdle = () => false;
 			harness.ctx.waitForIdle = async () => { harness.ctx.isIdle = () => true; };
 			await compact("");
 			assert.match(harness.notifications.at(-2)!, /when the current run finishes/);
-			assert.equal(harness.sentUserMessages.length, 3);
-			assert.equal(harness.sentUserMessages.at(-1)!.options, undefined);
+			assert.equal(harness.sentMessages.length, 3);
+			assert.deepEqual(harness.sentMessages.at(-1)!.options, { triggerTurn: true });
 
 			// A custom template replaces the prompt; a file that cannot be read is rejected when it is set.
 			const directory = await mkdtemp(join(tmpdir(), "clm-compact-"));
@@ -1493,12 +1496,26 @@ describe("pi-clm entry point", () => {
 			await harness.commands.get("clm").handler("config compact-prompt /nonexistent/compact.md", harness.ctx);
 			assert.match(harness.notifications.at(-1)!, /compact prompt not loaded/);
 			await compact("tidy up");
-			assert.equal(String(harness.sentUserMessages.at(-1)!.content), `Shrink ${mirror} (10k). Also: tidy up`);
+			assert.equal(String(harness.sentMessages.at(-1)!.content), `[CLM maintenance]\n\nShrink ${mirror} (10k). Also: tidy up`);
 
 			await harness.commands.get("clm").handler("off", harness.ctx);
 			await compact("");
 			assert.match(harness.notifications.at(-1)!, /CLM is off/);
-			assert.equal(harness.sentUserMessages.length, 4);
+			assert.equal(harness.sentMessages.length, 4);
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+
+	test("CLM: /clm-compact uses a custom follow-up if another run wins the idle race", async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		try {
+			await emit(harness, "context", { messages: [{ role: "user", content: "task", timestamp: 1 }] });
+			harness.ctx.isIdle = () => false;
+			harness.ctx.waitForIdle = async () => {};
+			await harness.commands.get("clm-compact").handler("", harness.ctx);
+			assert.equal(harness.sentMessages.length, 1);
+			assert.deepEqual(harness.sentMessages[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
@@ -1525,8 +1542,8 @@ describe("pi-clm entry point", () => {
 		await emit(harness, "session_start", { reason: "resume" });
 		try {
 			await harness.commands.get("clm-compact").handler("", harness.ctx);
-			assert.equal(harness.sentUserMessages.length, 1, "a nonempty restored context is compacted");
-			assert.match(String(harness.sentUserMessages[0]!.content), /about 3\.5k tokens/);
+			assert.equal(harness.sentMessages.length, 1, "a nonempty restored context is compacted");
+			assert.match(String(harness.sentMessages[0]!.content), /about 3\.5k tokens/);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
@@ -1549,16 +1566,16 @@ describe("pi-clm entry point", () => {
 			harness.ctx.isIdle = () => true;
 			release();
 			await stale;
-			assert.equal(harness.sentUserMessages.length, 0);
+			assert.equal(harness.sentMessages.length, 0);
 			assert.match(harness.notifications.at(-1)!, /live context changed while \/clm-compact was waiting/);
 
 			// Two while one run is busy: Pi still reports idle for a moment after the first send, so a
 			// second send would throw "Agent is already processing a prompt"; it is refused instead.
 			let processing = false;
-			(harness.pi as any).sendUserMessage = (content: unknown, options?: { deliverAs?: string }) => {
+			(harness.pi as any).sendMessage = (message: any, options?: { deliverAs?: string }) => {
 				if (processing && !options?.deliverAs) throw new Error("Agent is already processing a prompt");
 				processing = true;
-				harness.sentUserMessages.push({ content, options });
+				harness.sentMessages.push({ ...message, options });
 			};
 			harness.ctx.isIdle = () => false;
 			harness.ctx.waitForIdle = () => new Promise<void>((resolve) => { release = resolve; });
@@ -1568,7 +1585,7 @@ describe("pi-clm entry point", () => {
 			harness.ctx.isIdle = () => true;
 			release();
 			await first;
-			assert.equal(harness.sentUserMessages.length, 1);
+			assert.equal(harness.sentMessages.length, 1);
 
 			// A send Pi refuses anyway is reported, not thrown.
 			harness.ctx.waitForIdle = async () => {};

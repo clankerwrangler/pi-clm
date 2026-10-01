@@ -140,7 +140,13 @@ compaction, and `on` leaves Pi alone. Manual compaction is never cancelled.
 Environment values establish load-time defaults. Branch-persisted overrides are managed
 through `/clm config` and the panel's settings page. Helper exposure is load-time only.
 Steering text is loaded independently from the protocol and identified by a content hash.
-`/clm-compact` sends a model prompt, optionally templated; it does not bypass validation.
+`/clm-compact` sends a displayed `clm-maintenance` custom message through Pi's public
+`sendMessage` API, with `triggerTurn: true`. It waits for idle and uses follow-up delivery
+if another run starts before sending. The content is labeled **CLM maintenance**, including
+custom templates. It is not stored as a user message; Pi lowers custom content to user-level
+model input, never system authority. Stock Pi renders its distinct custom-message label.
+Hosts may omit generic custom messages: the current harness WebUI hides this generated
+prompt rather than attributing it to the user. It does not bypass edit validation.
 The optional one-tool-per-turn and size-trailer switches preserve paper comparison modes.
 
 The panel offers overview, input, edits, and settings. Its timeline derives from public
