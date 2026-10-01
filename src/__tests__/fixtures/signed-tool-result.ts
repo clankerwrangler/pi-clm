@@ -1,7 +1,7 @@
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 
 /** A normal Responses-shaped complete native pair, including opaque public-SDK fields. */
-export function signedToolResult() {
+export function signedToolResult(extraMetadata = false) {
 	const assistant: AssistantMessage = {
 		role: "assistant", provider: "openai", api: "openai-responses", model: "gpt-5", responseId: "resp_fixture",
 		content: [
@@ -19,5 +19,8 @@ export function signedToolResult() {
 		content: [{ type: "text", text: "stale complete output\n".repeat(10_000) }],
 		isError: false, timestamp: 3, details: { source: "fixture", nested: { kept: true } },
 	};
+	if (extraMetadata) for (const block of assistant.content) {
+		Object.assign(block, { extensionEnvelope: { opaque: "retained exactly", values: [1, null, true] } });
+	}
 	return { assistant, result };
 }

@@ -65,9 +65,13 @@ Protection is conservative:
   transformed or opaque content is reverse-engineered.
 - Pending, incomplete, ambiguous, and orphan native call/result spans are preserved exactly.
   Calls and results need not be adjacent; groups are matched globally by native call ID.
-- Unknown roles/blocks, incomplete or ambiguous groups, and opaque/unmapped results stay
-  protected with their related native endpoints. Recognized public SDK signed assistant
-  blocks remain exact without freezing uniquely matched, completed, mapped text-result bodies.
+- Unknown roles/block types, malformed public content, incomplete or ambiguous groups,
+  and opaque/unmapped results stay protected with their related native endpoints.
+  Signatures and extra fields on valid public assistant blocks are immutable envelope
+  metadata, not new content types. The entire assistant stays exact while a separately
+  mapped plain-text result may shrink after a successful terminal state (`stop`, `toolUse`,
+  or `length`), unique group completion, and matching tool names. Extra metadata never
+  establishes completion. Ordinary metadata-free assistant text remains editable.
 - Such results retain their native role, call ID, tool name, metadata, and valid order.
   Only text content changes; deletion, role changes, or inversions are rejected. This rule
   also governs observation caps and withholding. Headerless rewrites cannot remove these

@@ -1824,8 +1824,8 @@ test("persisted overflow links survive mirror deletion, resume, and same-host br
 });
 
 
-for (const sourceMapping of ["mapped", "unmapped assistant", "unmapped result"] as const) for (const transform of ["edit", "cap", "overflow"] as const) {
-	test(`${sourceMapping}: signed complete text result ${transform} respects source and envelope boundaries`, async () => {
+for (const extraMetadata of [false, true]) for (const sourceMapping of ["mapped", "unmapped assistant", "unmapped result"] as const) for (const transform of ["edit", "cap", "overflow"] as const) {
+	test(`${sourceMapping}${extraMetadata ? " with extra envelope metadata" : ""}: signed complete text result ${transform} respects source and envelope boundaries`, async () => {
 		const harness = createHarness();
 		liveContextExtension(harness.pi, { editingMode: "clm",
 			...(transform === "cap" ? { observationCap: { maxCharacters: 200 } } : {}),
@@ -1833,7 +1833,7 @@ for (const sourceMapping of ["mapped", "unmapped assistant", "unmapped result"] 
 		});
 		await emit(harness, "session_start", {});
 		try {
-			let { assistant, result } = signedToolResult();
+			let { assistant, result } = signedToolResult(extraMetadata);
 			let raw = [{ role: "user", content: "Summarize the output.", timestamp: 1 }, assistant, result];
 			let response = (await emit(harness, "context", { messages: raw }))[0];
 			if (sourceMapping === "unmapped assistant") {

@@ -60,15 +60,21 @@ java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
 
 ## Completed native result bodies
 
-`NativeBody.tla` separates a completed mapped text body from the exact native envelope
-and signed assistant. It also covers an unmapped assistant whose blocks have recognized
-public SDK shapes: that assistant remains exact while a separately mapped result body
-can shrink. Pending, partial, ambiguous, unknown-block, opaque-result, and unmapped-result
-cases remain fully exact. Body edits, caps, and withholding preserve identity, metadata,
-and order; deleting or changing an envelope is refused. The refined model was checked
-before the corresponding change: 968 generated states, 96 distinct, no invariant violations.
-This finite model abstracts the block classification; realistic public-SDK fixture tests
-check classification, smaller accepted bodies, caps, withholding, and rejected edits.
+`NativeBody.tla` separates a completed mapped text body from the exact assistant and
+result envelopes. Recognized public content cores may carry signatures or arbitrary
+extra metadata, all preserved exactly. Mapping the assistant is not required when the
+result maps independently. Unknown/malformed cores, pending/deferred/partial/unsettled
+assistants, duplicate/unmatched/inverted/name-mismatched groups, and opaque/unmapped
+results stay protected. Body edits, caps, and withholding preserve identity, metadata,
+and order; ordinary metadata-free text remains editable.
+
+Before the corresponding implementation, the refined finite model passed 174,178
+generated states and 15,798 distinct states. `BodyProgress` requires actual shortening
+of eligible bodies, not just safety through refusing every edit. Setting the diagnostic
+constant `OverprotectMetadata` to `TRUE` reproduces a two-state `BodyProgress` violation;
+the checked configuration sets it to `FALSE`. This model abstracts public-field parsing
+and group discovery; implementation tests check malformed fields, exact envelopes,
+source mapping, completed groups, caps, withholding, and rejected edits.
 
 From `spec/`:
 

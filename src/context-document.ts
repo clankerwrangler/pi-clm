@@ -339,23 +339,28 @@ function changedMessage(source: LiveContextMessage, body: string, requestedRole:
 	return contextNote(body, source, labelRole ? requestedRole : undefined);
 }
 
-/** Only these public SDK assistant blocks can carry an exact envelope around an editable result. */
-function knownAssistantContent(message: LiveContextMessage): boolean {
+/** Validate public content semantics; additional fields stay in the exact assistant envelope. */
+function knownAssistantCore(message: LiveContextMessage): boolean {
 	return Array.isArray(message.content) && message.content.every((part) => {
-		if (!part || typeof part !== "object") return false;
+		if (!part || typeof part !== "object" || Array.isArray(part)) return false;
 		const block = part as Record<string, unknown>;
-		const allowed = block.type === "text" ? ["type", "text", "textSignature"] :
-			block.type === "thinking" ? ["type", "thinking", "thinkingSignature", "redacted"] :
-			block.type === "toolCall" ? ["type", "id", "name", "arguments", "thoughtSignature", "namespace"] : [];
-		return allowed.length > 0 && Object.keys(block).every((key) => allowed.includes(key));
+		const optional = (key: string, type: string) => block[key] === undefined || typeof block[key] === type;
+		if (block.type === "text") return typeof block.text === "string" && optional("textSignature", "string");
+		if (block.type === "thinking") return typeof block.thinking === "string" &&
+			optional("thinkingSignature", "string") && optional("redacted", "boolean");
+		if (block.type === "toolCall") return typeof block.id === "string" && block.id.length > 0 &&
+			typeof block.name === "string" && block.name.length > 0 &&
+			Boolean(block.arguments) && typeof block.arguments === "object" && !Array.isArray(block.arguments) &&
+			optional("thoughtSignature", "string") && optional("namespace", "string");
+		return false;
 	});
 }
 
 /** Unknown content and incomplete native spans stay exact; signed complete calls permit text-result bodies. */
 export function intrinsicProtectedIndexes(messages: LiveContextMessage[], required = new Set<number>()): Set<number> {
 	const protectedIndexes = new Set(required);
-	// A public-shaped assistant can stay exact without freezing a separately mapped result body.
-	const fullGroup = new Set([...required].filter((index) => messages[index]?.role !== "assistant" || !knownAssistantContent(messages[index])));
+	// Extra metadata freezes the assistant, not a separately mapped completed result body.
+	const fullGroup = new Set([...required].filter((index) => messages[index]?.role !== "assistant" || !knownAssistantCore(messages[index])));
 	const results = new Map<string, number[]>();
 	const calls = new Map<string, number[]>();
 	for (const [index, message] of messages.entries()) {
@@ -378,9 +383,10 @@ export function intrinsicProtectedIndexes(messages: LiveContextMessage[], requir
 			return block.type !== "text" || typeof block.text !== "string" || Object.keys(block).some((key) => !["type", "text"].includes(key));
 		}));
 		const pending = message.deferred || message.stopReason === "pending" || message.stopReason === "deferred";
-		if (!knownRole || opaqueContent || nonTextResult || pending) {
+		const malformedAssistant = message.role === "assistant" && Array.isArray(message.content) && !knownAssistantCore(message);
+		if (!knownRole || opaqueContent || nonTextResult || pending || malformedAssistant) {
 			protectedIndexes.add(index);
-			if (!knownRole || nonTextResult || pending || message.role !== "assistant" || !knownAssistantContent(message)) fullGroup.add(index);
+			if (!knownRole || nonTextResult || pending || message.role !== "assistant" || !knownAssistantCore(message)) fullGroup.add(index);
 		}
 		// Duplicate native IDs inside one assistant message are ambiguous too.
 		if (Array.isArray(message.content)) {
@@ -391,8 +397,13 @@ export function intrinsicProtectedIndexes(messages: LiveContextMessage[], requir
 	for (const [index, message] of messages.entries()) {
 		const ids = toolCallIds(message);
 		if (ids.size === 0) continue;
-		const incomplete = [...ids].some((id) => calls.get(id)?.length !== 1 || results.get(id)?.length !== 1 || results.get(id)![0] < index);
-		const opaque = fullGroup.has(index) || [...ids].some((id) => results.get(id)?.some((i) => protectedIndexes.has(i)));
+		const exactAssistant = message.role === "assistant" && protectedIndexes.has(index);
+		// Body-only admission needs an authoritative terminal state and matching names.
+		// Keep legacy metadata-free pair editing separate from this exact-envelope path.
+		const unsettled = exactAssistant && !["stop", "toolUse", "length"].includes(String(message.stopReason));
+		const incomplete = [...ids].some((id) => calls.get(id)?.length !== 1 || results.get(id)?.length !== 1 || results.get(id)![0] < index ||
+			(exactAssistant && messages[results.get(id)![0]].toolName !== contentToolCalls(message).find((call) => call.id === id)?.name));
+		const opaque = unsettled || fullGroup.has(index) || [...ids].some((id) => results.get(id)?.some((i) => protectedIndexes.has(i)));
 		if (incomplete || opaque) {
 			protectedIndexes.add(index);
 			for (const id of ids) for (const i of results.get(id) ?? []) protectedIndexes.add(i);

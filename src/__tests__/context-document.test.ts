@@ -458,6 +458,44 @@ describe("signed completed calls with editable result bodies", () => {
 		assert.equal(hasOrphanToolMessages(applied.messages), false);
 	});
 
+	describe("recognized public cores with immutable envelope metadata", () => {
+		for (const blockType of ["text", "thinking", "toolCall"]) for (const mapped of [true, false]) {
+			test(`${blockType} metadata, ${mapped ? "mapped" : "unmapped"} assistant: only the completed body shrinks`, () => {
+				const { assistant, result, messages } = fixture();
+				// Avoid relying on signatures alone to freeze text/tool-call metadata.
+				assistant.content = assistant.content.filter((part) => part.type === "toolCall" || part.type === blockType);
+				for (const part of assistant.content) {
+					if (part.type === "text") delete part.textSignature;
+					if (part.type === "thinking") delete part.thinkingSignature;
+					if (part.type === blockType) Object.assign(part, { arbitraryEnvelope: { retained: [true, "opaque"] } });
+				}
+				const snapshot = renderContextDocument(messages, { protectedIndexes: mapped ? new Set() : new Set([1]) });
+				assert.equal(snapshot.blocks[1].protected, true);
+				assert.equal(snapshot.blocks[2].protected, false);
+				const edited = replaceBody(snapshot, 2, "Reviewed output.");
+				const applied = applyContextDocument(edited, snapshot, { editingMode: "clm" });
+				assert.equal(applied.accepted, true, applied.reason);
+				assert.ok(applied.savingsEstimate > 100_000);
+				assert.equal(applied.messages[1], assistant);
+				assert.deepEqual(applied.messages[2], { ...result, content: [{ type: "text", text: "Reviewed output." }] });
+				const rewrite = applyContextDocument(replaceBody(snapshot, 1, "Do not rewrite this envelope."), snapshot, { editingMode: "clm" });
+				assert.equal(rewrite.messages[1], assistant);
+			});
+		}
+
+		test("ordinary metadata-free text remains editable in block and legacy string form", () => {
+			for (const content of ["long ordinary text", [{ type: "text", text: "long ordinary text" }]]) {
+				const message = { role: "assistant", content, timestamp: 1 };
+				const snapshot = renderContextDocument([message], { protectedIndexes: new Set() });
+				assert.equal(snapshot.blocks[0].protected, false);
+				const applied = applyContextDocument(replaceBody(snapshot, 0, "short"), snapshot, { editingMode: "clm" });
+				assert.equal(applied.accepted, true);
+				assert.ok(applied.savingsEstimate > 0);
+				assert.notDeepEqual(applied.messages[0], message);
+			}
+		});
+	});
+
 	for (const invalid of ["delete", "role", "invert", "reorder", "headerless"] as const) {
 		test(`body-only completed results reject ${invalid}`, () => {
 			const { messages } = fixture();
@@ -473,7 +511,29 @@ describe("signed completed calls with editable result bodies", () => {
 		});
 	}
 
-	for (const blocked of ["pending", "partial", "ambiguous", "opaque result", "unmapped result", "unknown assistant"] as const) {
+	const blockedChanges: Record<string, (messages: LiveContextMessage[]) => void> = {
+		deferred: (m) => { m[1].deferred = { provider: "fixture", id: "pending" }; },
+		"deferred stop reason": (m) => { m[1].stopReason = "deferred"; },
+		"missing terminal state": (m) => { delete m[1].stopReason; },
+		"partial error": (m) => { m[1].stopReason = "error"; },
+		"partial aborted": (m) => { m[1].stopReason = "aborted"; },
+		"duplicate result": (m) => { m.push({ ...m[2] }); },
+		"duplicate call owner": (m) => { m.push({ ...m[1] }); },
+		"mismatched tool name": (m) => { m[2].toolName = "different"; },
+		"missing result name": (m) => { delete m[2].toolName; },
+		"malformed text": (m) => { (m[1].content as any[])[1].text = 42; },
+		"malformed thinking": (m) => { delete (m[1].content as any[])[0].thinking; },
+		"malformed call id": (m) => { (m[1].content as any[])[2].id = null; },
+		"malformed call name": (m) => { (m[1].content as any[])[2].name = 42; },
+		"malformed call arguments": (m) => { (m[1].content as any[])[2].arguments = []; },
+		"malformed text signature": (m) => { (m[1].content as any[])[1].textSignature = {}; },
+		"malformed thinking signature": (m) => { (m[1].content as any[])[0].thinkingSignature = 42; },
+		"malformed redaction": (m) => { (m[1].content as any[])[0].redacted = "yes"; },
+		"malformed thought signature": (m) => { (m[1].content as any[])[2].thoughtSignature = false; },
+		"malformed namespace": (m) => { (m[1].content as any[])[2].namespace = 42; },
+		"opaque text-result metadata": (m) => { (m[2].content as any[])[0].opaque = true; },
+	};
+	for (const blocked of ["pending", "partial", "ambiguous", "opaque result", "unmapped result", "unknown assistant", ...Object.keys(blockedChanges)]) {
 		test(`${blocked} stays fully exact instead of exposing a result body`, () => {
 			const { messages } = fixture();
 			const required = new Set<number>();
@@ -482,7 +542,8 @@ describe("signed completed calls with editable result bodies", () => {
 			else if (blocked === "ambiguous") (messages[1].content as any[]).push((messages[1].content as any[]).at(-1));
 			else if (blocked === "opaque result") (messages[2].content as any[]).push({ type: "image", mimeType: "image/png", data: "opaque" });
 			else if (blocked === "unmapped result") required.add(2);
-			else (messages[1].content as any[]).push({ type: "unknownProviderContent", data: "opaque" });
+			else if (blocked === "unknown assistant") (messages[1].content as any[]).push({ type: "unknownProviderContent", data: "opaque" });
+			else blockedChanges[blocked](messages);
 			const protectedIndexes = intrinsicProtectedIndexes(messages, required);
 			assert.ok(protectedIndexes.has(1)); assert.ok(protectedIndexes.has(2));
 			const snapshot = renderContextDocument(messages, { protectedIndexes: required });
