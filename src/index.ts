@@ -15,7 +15,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { applyContextDocument, canonicalMessage, digestMessages, intrinsicProtectedIndexes, renderContextDocument } from "./context-document.ts";
+import { applyContextDocument, digestMessages, renderContextDocument } from "./context-document.ts";
 import {
 	CONTINUITY_SIZE_WARNING_TOKENS,
 	DEFAULT_RECALL_TOKENS,
@@ -1369,19 +1369,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 		const visibleRawMessages = selectContextVisibleMessages(rawMessages);
 		effectiveMessages = selectContextVisibleMessages(effectiveMessages);
-		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
-		const owned = new Set([
-			...(state.checkpoint?.projectedMessages.map(canonicalMessage) ?? []),
-			...branch.flatMap((entry) => { const message = messageFromSessionEntry(entry); return message ? [canonicalMessage(message)] : []; }),
-		]);
-		const unmapped = new Set(effectiveMessages.flatMap((message, index) =>
-			owned.has(canonicalMessage(message)) ? [] : [index],
-		));
-		const protectedContent = intrinsicProtectedIndexes(effectiveMessages, unmapped);
-		if (editingMode === "clm") {
-			const capped = capObservations(effectiveMessages, observationCap);
-			effectiveMessages = effectiveMessages.map((message, index) => protectedContent.has(index) ? message : capped[index]);
-		}
+		if (editingMode === "clm") effectiveMessages = capObservations(effectiveMessages, observationCap);
 		pendingOverflowNotice = undefined;
 		// Learn from the provider's count of the previous request before estimating this one.
 		if (editingMode === "clm") calibrator.observe(lastProviderReportedTokens(rawMessages));
@@ -1395,7 +1383,6 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				const guarded = applyOverflowGuard(effectiveMessages, {
 					limit,
 					fixedTokens,
-					protectedIndexes: protectedContent,
 					estimate: (messages) => calibrator.apply(estimateLiveContextTokens(messages)),
 					saveDirectory: ctx.sessionManager.getSessionFile()
 						? `${ctx.sessionManager.getSessionFile()}.clm-outputs`
@@ -1438,8 +1425,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		// mirror compression cannot silently remove an active obligation or exact pin.
 		const snapshot = renderContextDocument(snapshotMessages(effectiveMessages), {
 			revision: state.revision,
-			protectedIndexes: editingMode === "clm" ? unmapped : undefined,
-			additionalProtectedIndexes: unmapped,
+			protectedIndexes: editingMode === "clm" ? new Set<number>() : undefined,
 			documentSeed: randomUUID(),
 		});
 		const rawSnapshot = snapshotMessages(rawMessages);

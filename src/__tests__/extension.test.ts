@@ -15,6 +15,7 @@ import {
 	PROJECTION_PREFIX_MISMATCH_REASON,
 } from "../projection.ts";
 import { LIVE_CONTEXT_STATE } from "../state.ts";
+import { mixedHistory } from "./fixtures/mixed-history.ts";
 import { signedToolResult } from "./fixtures/signed-tool-result.ts";
 import type { LiveContextMessage } from "../types.ts";
 
@@ -1667,6 +1668,72 @@ describe("async file submissions and independent safety", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
+	test("whole mixed-history replacement persists, resumes, and preserves appended unseen suffix", async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm", overflow: { mode: "off" } });
+		await emit(harness, "session_start", {});
+		try {
+			const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+			const path = before[0].systemPrompt.match(/mirrored at `([^`]+)`/)[1] as string;
+			const raw = mixedHistory();
+			const saved = structuredClone(raw);
+			await emit(harness, "context", { messages: raw });
+			const mirror = await readFile(path, "utf8");
+			assert.doesNotMatch(mirror, /protected=true/);
+			const draft = `${mirror.split("\n")[0]}\nCurrent findings: ready for the next task.`;
+			const suffix = [{ role: "user", content: "Arrived after the draft.", timestamp: 20 }];
+			await emit(harness, "context", { messages: [...raw, ...suffix] });
+			const sourceEntries = structuredClone(harness.branch);
+			await submit(path, draft);
+			const result = (await nextRequest(harness))[0].messages;
+			const checkpoint = harness.branch.at(-1).data.checkpoint;
+			assert.equal(checkpoint.projectedMessages.length, 2);
+			assert.ok(JSON.stringify(checkpoint.projectedMessages).length < JSON.stringify(raw).length / 100);
+			assert.deepEqual(result.slice(2, 3), suffix);
+			assert.deepEqual(raw, saved);
+			assert.deepEqual(harness.branch.slice(0, sourceEntries.length), sourceEntries);
+			const resumed = createHarness(structuredClone(harness.branch));
+			liveContextExtension(resumed.pi, { editingMode: "clm", overflow: { mode: "off" } });
+			await emit(resumed, "session_start", {});
+			try {
+				const next = (await emit(resumed, "context", { messages: [...raw, ...suffix] }))[0].messages;
+				assert.deepEqual(next, [...checkpoint.projectedMessages, ...suffix]);
+			} finally { await emit(resumed, "session_shutdown", {}); }
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+
+	for (const unseenResult of [false, true]) for (const change of ["edit", "delete", "summary"] as const) {
+		test(`${change} of snapshot outstanding call rejects${unseenResult ? " even after an unseen result arrives" : " before completion"}; a fresh completed snapshot can summarize`, async () => {
+			const { harness, path } = await started();
+			try {
+				const { assistant, result } = signedToolResult(true);
+				const raw = [rawConversation()[0], assistant];
+				const saved = structuredClone(raw);
+				await emit(harness, "context", { messages: raw });
+				const mirror = await readFile(path, "utf8");
+				const draft = change === "summary" ? `${mirror.split("\n")[0]}\nComplete summary.` : mirror.replace(
+					/(\[\[CTX_TURN document=[a-f0-9]{64} index=2 role=assistant[^\n]*\]\]\n)[\s\S]*$/,
+					change === "edit" ? "$1Changed pending call." : "",
+				);
+				if (unseenResult) await emit(harness, "context", { messages: [...raw, result] });
+				await submit(path, draft);
+				const rejected = (await nextRequest(harness))[0].messages;
+				assert.match(JSON.stringify(rejected), /fresh completed snapshot/);
+				assert.equal(harness.branch.filter(entry => entry.customType === LIVE_CONTEXT_STATE).at(-1).data.lastOutcome.kind, "rejected");
+				assert.deepEqual(rejected[1], assistant);
+				if (unseenResult) assert.deepEqual(rejected[2], result);
+				assert.deepEqual(raw, saved);
+				await emit(harness, "context", { messages: [...raw, result] });
+				const fresh = await readFile(path, "utf8");
+				await submit(path, `${fresh.split("\n")[0]}\nComplete summary.`);
+				const accepted = (await nextRequest(harness))[0].messages;
+				assert.equal(harness.branch.at(-1).data.lastOutcome.kind, "applied");
+				assert.equal(accepted.some((message: any) => message.role === "toolResult"), false);
+				assert.equal(accepted.some((message: any) => message.role === "assistant"), false);
+			} finally { await emit(harness, "session_shutdown", {}); }
+		});
+	}
+
 	test("snapshot source is frozen before asynchronous mirror publication", async (t) => {
 		const { harness, path } = await started();
 		let release!: () => void;
@@ -1751,7 +1818,7 @@ describe("async file submissions and independent safety", () => {
 		await emit(harness, "session_shutdown", {});
 	});
 
-	test("unknown earlier context transformations are preserved, not assumed to be source entries", async () => {
+	test("earlier context transformations remain broadly editable without archive ownership matching", async () => {
 		const { harness, path } = await started();
 		try {
 			const raw = rawConversation();
@@ -1759,10 +1826,10 @@ describe("async file submissions and independent safety", () => {
 			const transformed = [{ ...raw[0], content: "unmappable context transform" }, raw[1]];
 			await emit(harness, "context", { messages: transformed, persistSources: false });
 			const text = await readFile(path, "utf8");
-			assert.match(text, /index=1 role=user[^\n]*protected=true/);
+			assert.match(text, /index=1 role=user[^\n]*protected=false/);
 			await submit(path, compactSecondTurn(text).replace("unmappable context transform", "removed"));
 			const result = await nextRequest(harness);
-			assert.equal(result[0].messages[0].content, "unmappable context transform");
+			assert.equal(result[0].messages[0].content, "removed");
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
@@ -1825,7 +1892,7 @@ test("persisted overflow links survive mirror deletion, resume, and same-host br
 
 
 for (const extraMetadata of [false, true]) for (const sourceMapping of ["mapped", "unmapped assistant", "unmapped result"] as const) for (const transform of ["edit", "cap", "overflow"] as const) {
-	test(`${sourceMapping}${extraMetadata ? " with extra envelope metadata" : ""}: signed complete text result ${transform} respects source and envelope boundaries`, async () => {
+	test(`${sourceMapping}${extraMetadata ? " with extra envelope metadata" : ""}: signed complete text result ${transform} retains broad editing`, async () => {
 		const harness = createHarness();
 		liveContextExtension(harness.pi, { editingMode: "clm",
 			...(transform === "cap" ? { observationCap: { maxCharacters: 200 } } : {}),
@@ -1854,12 +1921,16 @@ for (const extraMetadata of [false, true]) for (const sourceMapping of ["mapped"
 				await submit(path, edited);
 				response = (await nextRequest(harness))[0];
 			}
-			assert.deepEqual(response.messages[1], assistant);
 			const visible = response.messages[2];
-			assert.deepEqual({ ...visible, content: result.content }, result);
-			if (sourceMapping === "unmapped result") assert.deepEqual(visible, result);
-			else assert.ok(JSON.stringify(visible.content).length < JSON.stringify(result.content).length / 10);
-			if (transform === "overflow" && sourceMapping !== "unmapped result") {
+			assert.ok(JSON.stringify(visible.content).length < JSON.stringify(result.content).length / 10);
+			if (transform === "edit") {
+				assert.equal(response.messages[1].role, "custom", "edited result breaks the native pair, lowered as upstream text");
+				assert.equal(visible.role, "custom");
+			} else {
+				assert.deepEqual(response.messages[1], assistant);
+				assert.deepEqual({ ...visible, content: result.content }, result);
+			}
+			if (transform === "overflow") {
 				const file = /Full text: (.+)$/.exec(visible.content[0].text)![1];
 				assert.equal(await readFile(file, "utf8"), (result.content[0] as { text: string }).text);
 			}

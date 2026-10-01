@@ -165,7 +165,6 @@ function escapeRegExp(value: string): string {
 export interface RenderContextDocumentOptions {
 	revision?: number;
 	protectedIndexes?: Set<number>;
-	additionalProtectedIndexes?: Set<number>;
 	/**
 	 * When set, the document nonce is derived from this seed and the revision instead of
 	 * the rendered baseline, so it stays constant between accepted edits even as new
@@ -180,10 +179,7 @@ export function renderContextDocument(
 	options: RenderContextDocumentOptions = {},
 ): ContextDocumentSnapshot {
 	const revision = options.revision ?? 0;
-	const protectedIndexes = intrinsicProtectedIndexes(messages, new Set([
-		...(options.protectedIndexes ?? selectProtectedMessageIndexes(messages)),
-		...(options.additionalProtectedIndexes ?? []),
-	]));
+	const protectedIndexes = options.protectedIndexes ?? selectProtectedMessageIndexes(messages);
 	const baselineDigest = digestMessages(messages);
 	const stable = options.documentSeed !== undefined;
 	const currentDocumentId = documentId(stable ? `seed:${options.documentSeed}` : baselineDigest, revision);
@@ -207,7 +203,7 @@ export function renderContextDocument(
 	const renderedBlocks = blocks.map((block) => `${block.header}\n${block.body}`);
 	const text = [
 		`[[LIVE_CONTEXT version=${DOCUMENT_VERSION} revision=${revision} document=${currentDocumentId} baseline=${baselineDigest}]]`,
-		"# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact. Results paired with protected calls permit body-only edits.",
+		"# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact.",
 		...renderedBlocks,
 	].join("\n\n");
 
@@ -294,6 +290,7 @@ function contentToolCalls(message: LiveContextMessage): Array<{ id?: string; nam
 
 function toolCallIds(message: LiveContextMessage): Set<string> {
 	const ids = new Set<string>();
+	if (message.role !== "assistant") return ids;
 	for (const call of contentToolCalls(message)) if (call.id) ids.add(call.id);
 	for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
 		if (call && typeof call === "object" && typeof (call as Record<string, unknown>).id === "string") {
@@ -339,119 +336,57 @@ function changedMessage(source: LiveContextMessage, body: string, requestedRole:
 	return contextNote(body, source, labelRole ? requestedRole : undefined);
 }
 
-/** Validate public content semantics; additional fields stay in the exact assistant envelope. */
-function knownAssistantCore(message: LiveContextMessage): boolean {
-	return Array.isArray(message.content) && message.content.every((part) => {
-		if (!part || typeof part !== "object" || Array.isArray(part)) return false;
-		const block = part as Record<string, unknown>;
-		const optional = (key: string, type: string) => block[key] === undefined || typeof block[key] === type;
-		if (block.type === "text") return typeof block.text === "string" && optional("textSignature", "string");
-		if (block.type === "thinking") return typeof block.thinking === "string" &&
-			optional("thinkingSignature", "string") && optional("redacted", "boolean");
-		if (block.type === "toolCall") return typeof block.id === "string" && block.id.length > 0 &&
-			typeof block.name === "string" && block.name.length > 0 &&
-			Boolean(block.arguments) && typeof block.arguments === "object" && !Array.isArray(block.arguments) &&
-			optional("thoughtSignature", "string") && optional("namespace", "string");
-		return false;
-	});
-}
-
-/** Unknown content and incomplete native spans stay exact; signed complete calls permit text-result bodies. */
-export function intrinsicProtectedIndexes(messages: LiveContextMessage[], required = new Set<number>()): Set<number> {
-	const protectedIndexes = new Set(required);
-	// Extra metadata freezes the assistant, not a separately mapped completed result body.
-	const fullGroup = new Set([...required].filter((index) => messages[index]?.role !== "assistant" || !knownAssistantCore(messages[index])));
-	const results = new Map<string, number[]>();
-	const calls = new Map<string, number[]>();
-	for (const [index, message] of messages.entries()) {
-		for (const id of toolCallIds(message)) calls.set(id, [...(calls.get(id) ?? []), index]);
-		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-			results.set(message.toolCallId, [...(results.get(message.toolCallId) ?? []), index]);
-		}
-		const knownRole = ["user", "assistant", "toolResult", "bashExecution"].includes(message.role) ||
-			(message.role === "custom" && message.customType === "live-context-projection");
-		const opaqueContent = Array.isArray(message.content) && message.content.some((part) => {
-			if (!part || typeof part !== "object") return true;
-			const block = part as Record<string, unknown>;
-			const allowed = block.type === "text" ? ["type", "text"] :
-				block.type === "toolCall" ? ["type", "id", "name", "arguments"] : [];
-			return allowed.length === 0 || Object.keys(block).some((key) => !allowed.includes(key));
-		});
-		const nonTextResult = message.role === "toolResult" && (!Array.isArray(message.content) || message.content.some((part) => {
-			if (!part || typeof part !== "object") return true;
-			const block = part as Record<string, unknown>;
-			return block.type !== "text" || typeof block.text !== "string" || Object.keys(block).some((key) => !["type", "text"].includes(key));
-		}));
-		const pending = message.deferred || message.stopReason === "pending" || message.stopReason === "deferred";
-		const malformedAssistant = message.role === "assistant" && Array.isArray(message.content) && !knownAssistantCore(message);
-		if (!knownRole || opaqueContent || nonTextResult || pending || malformedAssistant) {
-			protectedIndexes.add(index);
-			if (!knownRole || nonTextResult || pending || message.role !== "assistant" || !knownAssistantCore(message)) fullGroup.add(index);
-		}
-		// Duplicate IDs, including alternate legacy declarations, are ambiguous too.
-		if (Array.isArray(message.content)) {
-			const nativeCalls = message.content.filter((part) => part && typeof part === "object" && (part as { type?: unknown }).type === "toolCall");
-			const legacyCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-			if (nativeCalls.length + legacyCalls.length > toolCallIds(message).size) fullGroup.add(index);
-		}
-	}
-	for (const [index, message] of messages.entries()) {
-		const ids = toolCallIds(message);
-		if (ids.size === 0) continue;
-		const exactAssistant = message.role === "assistant" && protectedIndexes.has(index);
-		const publicCallNames = new Map(contentToolCalls(message).map((call) => [call.id, call.name]));
-		// Body-only admission needs an authoritative terminal state and matching names.
-		// Keep legacy metadata-free pair editing separate from this exact-envelope path.
-		const unsettled = exactAssistant && !(typeof message.stopReason === "string" && ["stop", "toolUse", "length"].includes(message.stopReason));
-		const incomplete = [...ids].some((id) => calls.get(id)?.length !== 1 || results.get(id)?.length !== 1 || results.get(id)![0] < index ||
-			(exactAssistant && (!publicCallNames.has(id) || messages[results.get(id)![0]].toolName !== publicCallNames.get(id))));
-		const opaque = unsettled || fullGroup.has(index) || [...ids].some((id) => results.get(id)?.some((i) => protectedIndexes.has(i)));
-		if (incomplete || opaque) {
-			protectedIndexes.add(index);
-			for (const id of ids) for (const i of results.get(id) ?? []) protectedIndexes.add(i);
-		}
-	}
-	for (const [index, message] of messages.entries()) {
-		if (message.role === "toolResult" && (typeof message.toolCallId !== "string" || !calls.has(message.toolCallId))) protectedIndexes.add(index);
-	}
-	return protectedIndexes;
-}
-
-/** Complete text results paired with an exact assistant may change bodies, never their native envelopes. */
-function bodyOnlyResultIndexes(snapshot: ContextDocumentSnapshot): Set<number> {
-	const exactCalls = new Set(snapshot.blocks.filter((block) => block.protected).flatMap((block) => [...toolCallIds(block.source)]));
-	return new Set(snapshot.blocks.filter((block) => !block.protected && block.source.role === "toolResult" &&
-		exactCalls.has(String(block.source.toolCallId))).map((block) => block.index));
-}
-
-/** Normalize only complete original spans whose endpoints the edit actually removed or changed. */
+/**
+ * Lower only edit-broken native relationships to text. Unlike upstream's adjacency
+ * check, an unchanged nonadjacent or outstanding group needs no normalization.
+ * Original objects (including signatures and extra metadata) otherwise stay exact.
+ */
 function repairToolGroups(messages: LiveContextMessage[], originals: LiveContextMessage[]): LiveContextMessage[] {
 	const repaired = [...messages];
-	const protectedOriginals = intrinsicProtectedIndexes(originals);
-	const immutable = new Set([...protectedOriginals].map((i) => originals[i]));
-	const resultIndexes = new Map<string, number[]>();
-	for (const [index, message] of messages.entries()) {
+	const sourceIndexes = new Map(originals.map((message, index) => [message, index]));
+	const outputIndexes = new Map(messages.map((message, index) => [message, index]));
+	const sourceResults = new Map<string, LiveContextMessage[]>();
+	const sourceCalls = new Set<string>();
+	for (const message of originals) {
+		for (const id of toolCallIds(message)) sourceCalls.add(id);
 		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-			resultIndexes.set(message.toolCallId, [...(resultIndexes.get(message.toolCallId) ?? []), index]);
+			sourceResults.set(message.toolCallId, [...(sourceResults.get(message.toolCallId) ?? []), message]);
 		}
 	}
 	const flattened = new Set<string>();
-	for (const [index, message] of repaired.entries()) {
-		if (message.role !== "assistant" || immutable.has(message)) continue;
+	for (const [index, message] of messages.entries()) {
 		const ids = toolCallIds(message);
-		if ([...ids].some((id) => !resultIndexes.has(id) || resultIndexes.get(id)!.some((i) => i <= index))) {
+		const sourceIndex = sourceIndexes.get(message)!;
+		const broken = [...ids].some((id) => (sourceResults.get(id) ?? []).some((result) => {
+			const resultIndex = outputIndexes.get(result);
+			return resultIndex === undefined || (resultIndex < index) !== (sourceIndexes.get(result)! < sourceIndex);
+		}));
+		if (broken) {
 			repaired[index] = contextNote(renderMessage(message), message);
 			for (const id of ids) flattened.add(id);
 		}
 	}
-	const remainingIds = new Set(repaired.flatMap((m) => [...toolCallIds(m)]));
+	const remainingIds = new Set(repaired.flatMap((message) => [...toolCallIds(message)]));
 	for (const [index, message] of repaired.entries()) {
-		if (message.role !== "toolResult" || immutable.has(message)) continue;
-		if (!remainingIds.has(String(message.toolCallId)) || flattened.has(String(message.toolCallId))) {
+		if (message.role !== "toolResult") continue;
+		const id = String(message.toolCallId);
+		if ((sourceCalls.has(id) && !remainingIds.has(id)) || flattened.has(id)) {
 			repaired[index] = contextNote(renderMessage(message), message);
 		}
 	}
 	return repaired;
+}
+
+/** A later unseen result must still have its original call in the accepted prefix. */
+function removesOutstandingCall(originals: LiveContextMessage[], proposed: LiveContextMessage[]): boolean {
+	const laterResults = new Set<string>();
+	const retained = new Set(proposed);
+	for (let index = originals.length - 1; index >= 0; index--) {
+		const message = originals[index];
+		if (message.role === "toolResult" && typeof message.toolCallId === "string") laterResults.add(message.toolCallId);
+		if ([...toolCallIds(message)].some((id) => !laterResults.has(id)) && !retained.has(message)) return true;
+	}
+	return false;
 }
 
 /** Outstanding calls are valid. Only results without an earlier call are orphaned. */
@@ -490,7 +425,6 @@ export function applyContextDocument(
 	const estimate = options.estimate ?? estimateContextCharacters;
 	const estimateUnit = options.estimateUnit ?? "characters";
 	const beforeEstimate = estimate(snapshot.messages);
-	const bodyOnly = bodyOnlyResultIndexes(snapshot);
 	if (editedText.trim() === snapshot.text.trim()) {
 		return {
 			accepted: true,
@@ -510,23 +444,9 @@ export function applyContextDocument(
 		diagnostics: string[],
 	): ApplyDocumentResult => {
 		const messages = repairToolGroups(candidate, snapshot.messages);
-		for (const sourceIndex of bodyOnly) {
-			const outputIndex = candidateOrigins.findIndex((origin) => origin.sourceIndex === sourceIndex);
-			const source = snapshot.messages[sourceIndex];
-			const output = messages[outputIndex];
-			if (!output || canonicalMessage({ ...source, content: undefined }) !== canonicalMessage({ ...output, content: undefined }) ||
-				candidateOrigins.some((origin, i) => origin.sourceIndex !== undefined &&
-					((origin.sourceIndex < sourceIndex && i > outputIndex) || (origin.sourceIndex > sourceIndex && i < outputIndex)))) {
-				return rejected(snapshot, beforeEstimate, "A completed result paired with a protected call permits body-only edits; keep its native role, identity, metadata, and source order.");
-			}
-		}
-		for (const sourceIndex of snapshot.blocks.filter((block) => block.protected).map((block) => block.index)) {
-			const outputIndex = candidateOrigins.findIndex((origin) => origin.sourceIndex === sourceIndex);
-			if (outputIndex < 0 || messages[outputIndex] !== snapshot.messages[sourceIndex] ||
-				candidateOrigins.some((origin, i) => origin.sourceIndex !== undefined &&
-					((origin.sourceIndex < sourceIndex && i > outputIndex) || (origin.sourceIndex > sourceIndex && i < outputIndex)))) {
-				return rejected(snapshot, beforeEstimate, "Edit would change or move a protected native or opaque span.");
-			}
+		if (removesOutstandingCall(snapshot.messages, messages)) {
+			return rejected(snapshot, beforeEstimate,
+				"Edit removes or changes a call not completed in this snapshot. Read a fresh completed snapshot and resubmit; unseen results must keep their original call.");
 		}
 		const afterEstimate = estimate(messages);
 		const requireShrink = options.requireShrink ?? options.editingMode !== "clm";
@@ -604,7 +524,7 @@ export function applyContextDocument(
 		const removedSourceIndexes = new Set<number>();
 		const firstUserIndex = snapshot.messages.findIndex((message) => message.role === "user");
 		for (const [index, message] of snapshot.messages.entries()) {
-			if (index === firstUserIndex || snapshot.blocks[index].protected) {
+			if (index === firstUserIndex) {
 				candidate.push(message);
 				candidateOrigins.push({ sourceIndex: index, kind: "kept" });
 			} else {
@@ -680,9 +600,6 @@ export function applyContextDocument(
 			if (restored) diagnostics.push(`Restored protected turn ${sourceBlock.index + 1}.`);
 			continue;
 		}
-		if (bodyOnly.has(sourceBlock.index) && (!parsedBlock?.body || parsedBlock.role !== sourceBlock.role)) {
-			return rejected(snapshot, beforeEstimate, "A completed result paired with a protected call permits body-only edits; do not delete it or change its role.");
-		}
 		if (!parsedBlock || !parsedBlock.body) {
 			removedSourceIndexes.add(sourceBlock.index);
 			continue;
@@ -695,9 +612,7 @@ export function applyContextDocument(
 			candidate.push(sourceBlock.source);
 			candidateOrigins.push({ sourceIndex: sourceBlock.index, kind: "kept" });
 		} else {
-			candidate.push(bodyOnly.has(sourceBlock.index)
-				? { ...sourceBlock.source, content: [{ type: "text", text: bodyText(parsedBlock.body, snapshot) }] }
-				: changedMessage(sourceBlock.source, bodyText(parsedBlock.body, snapshot), parsedBlock.role, options.editingMode === "clm"));
+			candidate.push(changedMessage(sourceBlock.source, bodyText(parsedBlock.body, snapshot), parsedBlock.role, options.editingMode === "clm"));
 			candidateOrigins.push({ sourceIndex: sourceBlock.index, kind: "edited" });
 		}
 	}

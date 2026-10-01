@@ -15,7 +15,7 @@ Three representations stay distinct:
 - **Mirror:** an immutable, metadata-bound snapshot of effective conversation text.
   System prompts, notices, and active continuity annotations are outside this file.
 
-The model owns retention strategy. The validator owns source identity, protected spans,
+The model owns retention strategy. The validator owns source identity, in-flight consistency,
 transaction freshness, and non-authoritative role lowering. Acceptance is not a guarantee
 of provider admissibility or semantic faithfulness.
 
@@ -57,44 +57,44 @@ survive reload; persisted checkpoints do.
 new blocks in CLM mode use unique `new-*` IDs. Authored role labels become plain text
 inside a custom projection message, never provider system instructions.
 
-Protection is conservative:
+Default CLM mode restores the upstream broad editing contract: no message category is
+intrinsically retained, and archive ownership is not a prerequisite for editing the model
+view. Summaries, custom messages, images, signed/thinking assistants, and completed native
+exchanges can be edited, deleted, or reordered. Changing a user or assistant body produces
+plain content; changing other roles produces a non-authoritative custom note. Untouched
+messages keep their original complete objects, including native metadata and signatures.
 
-- Content not exactly mapped to public session messages or an accepted projection is
-  protected. A public-shaped assistant may be unmapped while its independently mapped
-  completed result remains body-editable. The entire assistant still stays exact; no
-  transformed or opaque content is reverse-engineered.
-- Pending, incomplete, ambiguous, and orphan native call/result spans are preserved exactly.
-  Calls and results need not be adjacent; groups are matched globally by native call ID.
-- Unknown roles/block types, malformed public content, incomplete or ambiguous groups,
-  and opaque/unmapped results stay protected with their related native endpoints.
-  Signatures and extra fields on valid public assistant blocks are immutable envelope
-  metadata, not new content types. The entire assistant stays exact while a separately
-  mapped plain-text result may shrink after a supported terminal state (`stop`, `toolUse`,
-  or `length`), unique group completion, and matching tool names. Extra metadata never
-  establishes completion. Ordinary metadata-free assistant text remains editable.
-- Such results retain their native role, call ID, tool name, metadata, and valid order.
-  Only text content changes; deletion, role changes, or inversions are rejected. This rule
-  also governs observation caps and withholding. Headerless rewrites cannot remove these
-  required result envelopes; use a block-body edit instead.
-- Protected blocks cannot disappear or move across retained source blocks. Body edits are
-  restored to the original source. A conflicting ordering is rejected.
+As upstream does, edits that break a native call/result relationship lower the affected
+remaining representation to text. Unlike upstream's adjacent-group normalization, this
+fork leaves unchanged nonadjacent and outstanding groups intact. An unrelated edit does
+not manufacture results, discard signatures, or normalize a retained native group.
+This is structural normalization, not a guarantee of provider admissibility.
 
-Untouched messages retain their complete original structure. Editing a complete, editable
-native group may lower its changed call/result representation to text. This normalization
-never repairs an outstanding native call by pretending it was malformed. A headerless
-summary still requires the exact metadata line and retains the original task plus every
-protected span.
+The only in-flight admission rule concerns calls without a later matching result in the
+draft snapshot. If the proposed projection removes or changes such a call, acceptance is
+rejected with an explicit request for a fresh completed snapshot. This also applies when
+the real result arrived in the unseen suffix: that suffix must remain unchanged and would
+otherwise contain an orphan. Unrelated edits that retain the call remain available.
+There is no deferred submission queue, archive rewrite, or tool execution/replay path.
+A fully represented completed exchange can be deleted or replaced by a summary.
 
-Two policies share the same safety checks:
+A headerless summary still requires the exact metadata line. Following upstream, it
+retains the first user turn and adds one notes block; explicit block deletion plus a new
+notes block can replace even that first turn. Both forms reclaim the rest of mixed history.
 
 | Policy | Conservative | CLM (package entry) |
 |---|---|---|
 | Size | Must reduce estimated tokens | Growth and same-size edits allowed |
-| Additional protection | First/latest user message | No additional user protection |
-| Order | Preserve source order | Editable blocks may reorder without crossing protection |
+| Protected messages | First/latest user message | None |
+| Order | Preserve source order | Follow edited order |
 | New blocks | Rejected | `new-*`, any descriptive role label |
 | Guidance | Surgical-edit skill | Short protocol plus optional steering |
 | Commands | `/live-context`, `/live-context-view` | `/clm`, `/clm-compact` |
+
+Both policies retain transaction freshness, non-authoritative role lowering, and the
+narrow in-flight admission check. Canonical raw archives and execution/recovery state
+remain outside the editable projection. Removing historical model-view material does
+not remove raw history or authorize replay, credential changes, or policy changes.
 
 ## Persistence, branches, and annotations
 
@@ -175,11 +175,11 @@ require separate retention because persisted sessions may reference them. Remote
 tools need access to the same filesystem.
 
 The mirror excludes the real system prompt, but model-editable memory is still a
-prompt-injection surface. Protection prevents structural damage, not bad summaries.
+prompt-injection surface. Validation does not establish the truth or completeness of a summary.
 Editing removes context from future requests, not sensitive data from canonical history.
 
 The view does not include later provider-stage transformations, hidden checkpoints, or
-all provider framing overhead. Protected content alone may exceed the budget. Prefer a
+all provider framing overhead. Unedited content and material outside the mirror may still exceed the budget. Prefer a
 single context-management policy; the extension has no private composition contract
 with another context manager. Source tests and finite model checks are not a live-provider
 compatibility claim. Model coverage and bounds are in [spec/README.md](../spec/README.md).

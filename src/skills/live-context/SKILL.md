@@ -3,7 +3,7 @@ name: live-context
 description: Compact stale conversation history through Pi's private live-context mirror. Use when context pressure is high, tool outputs are large, or old exploration should be replaced by a durable summary.
 ---
 
-# Live Context Management
+# Conservative live-context management
 
 Pi's live-context extension places the current model-visible conversation in the mirror
 path named in the `## Editable context` section of the system prompt.
@@ -15,10 +15,9 @@ compact after every turn.
 
 1. Do **not** print or `cat` the entire mirror. Its contents are already in context.
 2. Preserve the `[[LIVE_CONTEXT ...]]` line and every retained `[[CTX_TURN ...]]` header.
-3. Never rewrite, remove, or move a `protected=true` turn; native/opaque spans remain exact.
-   A completed text result paired with a protected call permits body-only edits: keep its
-   header, role, and source order after the call. Do not delete it or replace it with a global
-   summary; shorten its body instead.
+3. Keep `protected=true` first/latest user turns unchanged. A call not yet completed
+   in the draft snapshot must also remain valid for its eventual result. If your edit
+   changes or removes that call, read a fresh completed snapshot before resubmitting.
 4. Make one batched draft submission. This is an atomicity rule, **not** a request
    for one global summary. One submission should contain as many independent, localized block
    replacements or removals as the revision needs. Read-only inspection is never counted.

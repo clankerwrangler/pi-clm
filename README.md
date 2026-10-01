@@ -7,7 +7,8 @@ not the canonical session history.
 
 This independent fork of [lolipopshock/pi-clm](https://github.com/lolipopshock/pi-clm)
 starts from upstream 1.0.0 (`b84a9d7`) and adds asynchronous-safe submissions,
-protected native tool spans, durable overflow files, and Pi 0.99.1 API support.
+durable overflow files, and Pi 0.99.1 API support. Default CLM mode retains upstream
+editing, deletion, reordering, and whole-context summary replacement.
 The upstream MIT license and history are retained. The project implements ideas from
 [Context Language Models](https://arxiv.org/pdf/2609.37725) and its
 [research codebase](https://github.com/facebookresearch/context-language-models).

@@ -130,7 +130,6 @@ export interface ApplyOverflowGuardOptions {
 	saveDirectory?: string;
 	/** Only messages at or after this index are candidates (the raw suffix after the last accepted edit); default 0. */
 	protectBefore?: number;
-	protectedIndexes?: Set<number>;
 }
 
 /**
@@ -146,7 +145,7 @@ export function applyOverflowGuard(messages: LiveContextMessage[], options: Appl
 	const candidates: number[] = [];
 	for (let index = options.protectBefore ?? 0; index < messages.length; index++) {
 		const message = messages[index]!;
-		if (message.role !== "toolResult" || options.protectedIndexes?.has(index)) continue;
+		if (message.role !== "toolResult") continue;
 		if (withheldCache.get(message) === message) continue; // already a note
 		const text = toolResultText(message);
 		if (text.startsWith("[pi-clm overflow guard]")) continue;

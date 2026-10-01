@@ -3,11 +3,9 @@ import { describe, test } from "node:test";
 
 import {
 	applyContextDocument,
-	intrinsicProtectedIndexes,
 	hasOrphanToolMessages,
 	renderContextDocument,
 } from "../context-document.ts";
-import { signedToolResult } from "./fixtures/signed-tool-result.ts";
 import type { ContextDocumentSnapshot, LiveContextMessage } from "../types.ts";
 
 function toolCall(id: string, command: string) {
@@ -370,15 +368,15 @@ describe("opaque content preservation", () => {
 });
 
 
-describe("native pending and opaque spans", () => {
+describe("retained native groups and in-flight admission", () => {
 	const call: LiveContextMessage = { role: "assistant", content: [toolCall("a", "a"), toolCall("b", "b")], timestamp: 1 };
 	const a: LiveContextMessage = { role: "toolResult", toolCallId: "a", content: [{ type: "text", text: "A" }], timestamp: 2 };
 	const unrelated: LiveContextMessage = { role: "assistant", content: [{ type: "text", text: "old explanation" }], timestamp: 3 };
 	test("unrelated editing preserves an outstanding parallel call and its completed sibling", () => {
 		const messages = [call, a, unrelated];
 		const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
-		assert.equal(snapshot.blocks[0].protected, true);
-		assert.equal(snapshot.blocks[1].protected, true);
+		assert.equal(snapshot.blocks[0].protected, false);
+		assert.equal(snapshot.blocks[1].protected, false);
 		const result = applyContextDocument(replaceBody(snapshot, 2, "short"), snapshot, { editingMode: "clm" });
 		assert.equal(result.accepted, true);
 		assert.equal(result.messages[0], call);
@@ -417,175 +415,23 @@ describe("native pending and opaque spans", () => {
 		assert.equal(result.messages[0], a);
 	});
 
-	test("headerless summary keeps native pending, signed blocks, and foreign checkpoint exact", () => {
-		const signed = { role: "assistant", content: [{ type: "text", text: "signed", textSignature: "opaque" }], timestamp: 5 };
-		const opaque = { role: "custom", customType: "foreign-checkpoint", content: "marker", details: { providerHistory: "opaque" }, timestamp: 6 };
-		const messages = [call, a, unrelated, signed, opaque];
-		const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
-		const result = applyContextDocument(`${snapshot.text.split("\n")[0]}\nsummary`, snapshot, { editingMode: "clm" });
-		assert.equal(result.accepted, true);
-		assert.deepEqual(result.messages.slice(0, 4), [call, a, signed, opaque]);
-		assert.equal(result.messages[0], call);
-		assert.equal(result.messages[3], opaque);
-	});
-	test("moving protected pending spans is rejected rather than repaired into text", () => {
+	for (const change of ["delete", "edit", "summary"] as const) {
+		test(`${change} of an outstanding call rejects with a fresh-snapshot reason`, () => {
+			const messages = [call, a, unrelated];
+			const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
+			const edited = change === "delete" ? deleteBlock(snapshot, 0) : change === "edit" ?
+				replaceBody(snapshot, 0, "finished") : `${snapshot.text.split("\n")[0]}\nsummary`;
+			const result = applyContextDocument(edited, snapshot, { editingMode: "clm" });
+			assert.equal(result.accepted, false);
+			assert.match(result.reason ?? "", /fresh completed snapshot/);
+			assert.deepEqual(result.messages, messages);
+		});
+	}
+	test("moving an outstanding call past text keeps it valid", () => {
 		const snapshot = renderContextDocument([call, a, unrelated], { protectedIndexes: new Set() });
-		const reordered = snapshot.text.split("[[CTX_TURN")[0] + [snapshot.blocks[2], snapshot.blocks[0], snapshot.blocks[1]].map((block) => `${block.header}\n${block.body}`).join("\n\n");
-		const result = applyContextDocument(reordered, snapshot, { editingMode: "clm" });
-		assert.equal(result.accepted, false);
-		assert.match(result.reason ?? "", /protected native or opaque span/);
+		const edited = snapshot.text.split("[[CTX_TURN")[0] + [2, 0, 1].map(i => `${snapshot.blocks[i].header}\n${snapshot.blocks[i].body}`).join("\n\n");
+		const result = applyContextDocument(edited, snapshot, { editingMode: "clm" });
+		assert.equal(result.accepted, true);
+		assert.deepEqual(result.messages, [unrelated, call, a]);
 	});
-});
-
-
-describe("signed completed calls with editable result bodies", () => {
-	function fixture() {
-		const { assistant, result } = signedToolResult();
-		const messages = [{ role: "user", content: "Summarize the output.", timestamp: 1 }, assistant, result] as unknown as LiveContextMessage[];
-		return { assistant, result, messages };
-	}
-	test("public Responses reasoning/signatures stay exact while a completed text body shrinks", () => {
-		const { assistant, result, messages } = fixture();
-		const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
-		assert.equal(snapshot.blocks[1].protected, true);
-		assert.equal(snapshot.blocks[2].protected, false);
-		const applied = applyContextDocument(replaceBody(snapshot, 2, "[summary: completed result]"), snapshot, { editingMode: "clm" });
-		assert.equal(applied.accepted, true, applied.reason);
-		assert.ok(applied.afterEstimate < applied.beforeEstimate / 10);
-		assert.equal(applied.messages[1], assistant);
-		assert.deepEqual(applied.messages[2], { ...result, content: [{ type: "text", text: "[summary: completed result]" }] });
-		assert.equal(applied.messages[2].details, result.details);
-		assert.equal(hasOrphanToolMessages(applied.messages), false);
-	});
-
-	describe("recognized public cores with immutable envelope metadata", () => {
-		for (const blockType of ["text", "thinking", "toolCall"]) for (const mapped of [true, false]) {
-			test(`${blockType} metadata, ${mapped ? "mapped" : "unmapped"} assistant: only the completed body shrinks`, () => {
-				const { assistant, result, messages } = fixture();
-				// Avoid relying on signatures alone to freeze text/tool-call metadata.
-				assistant.content = assistant.content.filter((part) => part.type === "toolCall" || part.type === blockType);
-				for (const part of assistant.content) {
-					if (part.type === "text") delete part.textSignature;
-					if (part.type === "thinking") delete part.thinkingSignature;
-					if (part.type === blockType) Object.assign(part, { arbitraryEnvelope: { retained: [true, "opaque"] } });
-				}
-				const snapshot = renderContextDocument(messages, { protectedIndexes: mapped ? new Set() : new Set([1]) });
-				assert.equal(snapshot.blocks[1].protected, true);
-				assert.equal(snapshot.blocks[2].protected, false);
-				const edited = replaceBody(snapshot, 2, "Reviewed output.");
-				const applied = applyContextDocument(edited, snapshot, { editingMode: "clm" });
-				assert.equal(applied.accepted, true, applied.reason);
-				assert.ok(applied.savingsEstimate > 100_000);
-				assert.equal(applied.messages[1], assistant);
-				assert.deepEqual(applied.messages[2], { ...result, content: [{ type: "text", text: "Reviewed output." }] });
-				const rewrite = applyContextDocument(replaceBody(snapshot, 1, "Do not rewrite this envelope."), snapshot, { editingMode: "clm" });
-				assert.equal(rewrite.messages[1], assistant);
-			});
-		}
-
-		test("metadata-free legacy pair editing is not narrowed by public-only body admission", () => {
-			const messages = [
-				{ role: "assistant", content: "legacy call", tool_calls: [{ id: "legacy", function: { name: "work", arguments: "{}" } }] },
-				{ role: "toolResult", toolCallId: "legacy", content: [{ type: "text", text: "ordinary output ".repeat(100) }] },
-			];
-			const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
-			assert.ok(snapshot.blocks.every((block) => !block.protected));
-			const applied = applyContextDocument(replaceBody(snapshot, 1, "short"), snapshot, { editingMode: "clm" });
-			assert.equal(applied.accepted, true); assert.ok(applied.savingsEstimate > 0);
-		});
-
-		test("length is terminal only for a fully closed valid group", () => {
-			for (const state of ["closed", "unfinished", "malformed"]) {
-				const { assistant, result, messages } = fixture();
-				assistant.stopReason = "length";
-				if (state === "unfinished") assistant.content.push(toolCall("pending", "work"));
-				if (state === "malformed") (assistant.content[2] as any).arguments = null;
-				const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
-				const applied = applyContextDocument(replaceBody(snapshot, 2, "short"), snapshot, { editingMode: "clm" });
-				assert.equal(applied.messages[1], assistant);
-				if (state === "closed") { assert.equal(applied.accepted, true); assert.ok(applied.savingsEstimate > 100_000); }
-				else { assert.equal(snapshot.blocks[2].protected, true); assert.equal(applied.messages[2], result); }
-			}
-		});
-
-		test("ordinary metadata-free text remains editable in block and legacy string form", () => {
-			for (const content of ["long ordinary text", [{ type: "text", text: "long ordinary text" }]]) {
-				const message = { role: "assistant", content, timestamp: 1 };
-				const snapshot = renderContextDocument([message], { protectedIndexes: new Set() });
-				assert.equal(snapshot.blocks[0].protected, false);
-				const applied = applyContextDocument(replaceBody(snapshot, 0, "short"), snapshot, { editingMode: "clm" });
-				assert.equal(applied.accepted, true);
-				assert.ok(applied.savingsEstimate > 0);
-				assert.notDeepEqual(applied.messages[0], message);
-			}
-		});
-	});
-
-	for (const invalid of ["delete", "role", "invert", "reorder", "headerless"] as const) {
-		test(`body-only completed results reject ${invalid}`, () => {
-			const { messages } = fixture();
-			if (invalid === "reorder") messages.push({ role: "assistant", content: [{ type: "text", text: "later unrelated work" }], timestamp: 4 });
-			const snapshot = renderContextDocument(messages, { protectedIndexes: new Set() });
-			const edit = invalid === "delete" ? deleteBlock(snapshot, 2) : invalid === "role" ? snapshot.text.replace("role=toolResult", "role=notes") :
-				invalid === "headerless" ? snapshot.text.split("\n")[0] + "\nsummary" :
-				snapshot.text.split("[[CTX_TURN")[0] + (invalid === "reorder" ? [snapshot.blocks[0], snapshot.blocks[1], snapshot.blocks[3], snapshot.blocks[2]] : [snapshot.blocks[0], snapshot.blocks[2], snapshot.blocks[1]]).map((block) => `${block.header}\n${block.body}`).join("\n\n");
-			const applied = applyContextDocument(edit, snapshot, { editingMode: "clm" });
-			assert.equal(applied.accepted, false);
-			assert.match(applied.reason ?? "", /body-only|protected native/);
-			assert.deepEqual(applied.messages, messages);
-		});
-	}
-
-	const blockedChanges: Record<string, (messages: LiveContextMessage[]) => void> = {
-		deferred: (m) => { m[1].deferred = { provider: "fixture", id: "pending" }; },
-		"deferred stop reason": (m) => { m[1].stopReason = "deferred"; },
-		"missing terminal state": (m) => { delete m[1].stopReason; },
-		"malformed terminal state": (m) => { m[1].stopReason = ["toolUse"]; },
-		"partial error": (m) => { m[1].stopReason = "error"; },
-		"partial aborted": (m) => { m[1].stopReason = "aborted"; },
-		"duplicate result": (m) => { m.push({ ...m[2] }); },
-		"unvalidated legacy group id": (m) => {
-			Object.assign((m[1].content as any[])[2], { arbitraryEnvelope: true });
-			m[1].tool_calls = [{ id: "legacy", function: { arguments: "{}" } }];
-			const legacyResult: LiveContextMessage = { ...m[2], toolCallId: "legacy" }; delete legacyResult.toolName;
-			m.push(legacyResult);
-		},
-		"duplicate alternate call id": (m) => {
-			m[1].tool_calls = [{ id: m[2].toolCallId, function: { name: "read", arguments: "{}" } }];
-		},
-		"duplicate call owner": (m) => { m.push({ ...m[1] }); },
-		"mismatched tool name": (m) => { m[2].toolName = "different"; },
-		"missing result name": (m) => { delete m[2].toolName; },
-		"malformed text": (m) => { (m[1].content as any[])[1].text = 42; },
-		"malformed thinking": (m) => { delete (m[1].content as any[])[0].thinking; },
-		"malformed call id": (m) => { (m[1].content as any[])[2].id = null; },
-		"malformed call name": (m) => { (m[1].content as any[])[2].name = 42; },
-		"malformed call arguments": (m) => { (m[1].content as any[])[2].arguments = []; },
-		"malformed text signature": (m) => { (m[1].content as any[])[1].textSignature = {}; },
-		"malformed thinking signature": (m) => { (m[1].content as any[])[0].thinkingSignature = 42; },
-		"malformed redaction": (m) => { (m[1].content as any[])[0].redacted = "yes"; },
-		"malformed thought signature": (m) => { (m[1].content as any[])[2].thoughtSignature = false; },
-		"malformed namespace": (m) => { (m[1].content as any[])[2].namespace = 42; },
-		"opaque text-result metadata": (m) => { (m[2].content as any[])[0].opaque = true; },
-	};
-	for (const blocked of ["pending", "partial", "ambiguous", "opaque result", "unmapped result", "unknown assistant", ...Object.keys(blockedChanges)]) {
-		test(`${blocked} stays fully exact instead of exposing a result body`, () => {
-			const { messages } = fixture();
-			const required = new Set<number>();
-			if (blocked === "pending") messages[1].stopReason = "pending";
-			else if (blocked === "partial") (messages[1].content as any[]).push(toolCall("unfinished", "work"));
-			else if (blocked === "ambiguous") (messages[1].content as any[]).push((messages[1].content as any[]).at(-1));
-			else if (blocked === "opaque result") (messages[2].content as any[]).push({ type: "image", mimeType: "image/png", data: "opaque" });
-			else if (blocked === "unmapped result") required.add(2);
-			else if (blocked === "unknown assistant") (messages[1].content as any[]).push({ type: "unknownProviderContent", data: "opaque" });
-			else blockedChanges[blocked](messages);
-			const protectedIndexes = intrinsicProtectedIndexes(messages, required);
-			assert.ok(protectedIndexes.has(1));
-			for (const [index, message] of messages.entries()) if (message.role === "toolResult") assert.ok(protectedIndexes.has(index));
-			const snapshot = renderContextDocument(messages, { protectedIndexes: required });
-			const applied = applyContextDocument(replaceBody(snapshot, 2, "short"), snapshot, { editingMode: "clm" });
-			assert.equal(applied.messages[1], messages[1]);
-			for (const [index, message] of messages.entries()) if (message.role === "toolResult") assert.equal(applied.messages[index], message);
-		});
-	}
 });

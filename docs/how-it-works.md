@@ -38,16 +38,26 @@ edit, changed source prefix/model, branch transition, reset, disabling, reload, 
 expiry rejects the old draft. Read the new mirror and prepare a new draft after rejection.
 Submissions are limited to 16 MiB.
 
-In CLM mode, editable blocks may shrink, grow, be removed, or be reordered without crossing
-protected blocks. New blocks use `id=new-…`; their role labels are descriptive text, not
-system-message authority. A global summary retains the exact metadata line but omits all
-turn headers; the original task and protected native/opaque spans remain. Pending calls,
-ambiguous native groups, and content not safely mapped to public session sources cannot
-be edited or discarded. Signed and unknown content is preserved rather than guessed at. A completed mapped
-plain-text result paired with a protected signed call can still shrink: edit only its
-body, keeping its header, native role, and source order after the call. Deleting or relabeling
-that result is rejected, including a global summary that would remove it. Caps and
-withholding follow the same rule and preserve its native envelope and metadata.
+In default CLM mode, all historical blocks may shrink, grow, be removed, or be reordered,
+including summaries, images, custom messages, signed/thinking assistants, and completed
+tool exchanges. New blocks use `id=new-…`; their role labels are descriptive text, not
+system-message authority. For a whole-context summary, keep the exact metadata line
+and replace all turn headers and bodies with your summary. This upstream shorthand keeps
+the first user turn plus one notes block. To replace the first user turn too, insert a
+new notes block and remove all original blocks explicitly.
+
+Unchanged native groups retain their original structure, even with nonadjacent results.
+Editing or partially deleting a completed group can turn its remaining call/result
+representation into ordinary text, as in upstream CLM. There is no mandatory historical
+retention by content type or archive ownership. The separate conservative mode keeps
+first/latest user turns, source order, and a shrink requirement.
+
+One in-flight constraint applies: a call not completed in the draft snapshot must remain
+valid in the proposed projection, because its result may arrive after that snapshot.
+An edit that removes or changes it is rejected with a fresh-completed-snapshot notice;
+it is not queued for later acceptance. Unrelated edits still work. Read a new snapshot
+containing the completed exchange before deleting or summarizing that exchange. Later
+raw messages are appended unchanged; projection edits never execute or replay tools.
 
 ## What runs without the model
 

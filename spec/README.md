@@ -1,84 +1,54 @@
-# Context safety model
+# Context models
 
-`ContextSafety.tla` models ordinary file submission, independent context reads,
-accepted revisions, pending native work, and the lifetime of overflow artifacts.
+These finite TLA+ models are checked before their corresponding implementation changes.
+They abstract parsing, public SDK serialization, filesystem atomicity, and runtime services;
+implementation and integration tests cover those boundaries separately.
+
+From `spec/`, set `TLA_TOOLS_JAR` to the local TLA+ tools jar:
 
 ```sh
-cd spec
-java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
-  -config ContextSafety.cfg ContextSafety.tla
+for model in ProjectionEditing ContextSafety ToolExposure; do
+  java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
+    -config "$model.cfg" "$model.tla"
+done
 ```
 
-Use TLA+ Tools 1.7.4 (TLC 2.19). The checked finite instance has two context
-read generations and at most two accepted or invalidated revisions. Before the
-corresponding implementation, TLC explored 56,811 generated states and 6,276
-distinct states, with no invariant violations.
+## Model-view editing
 
-| Model | Implementation |
-|---|---|
-| `Begin`, `Submit` | Copy one metadata-bound mirror; atomically rename the completed draft to `LIVE_CONTEXT.commit.md` |
-| `Refresh` | Publish another request snapshot without advancing the accepted edit revision |
-| `Consume` | Claim one submission, validate immutable baseline and current revision, then persist before activation |
-| `Invalidate` | Branch/reset/off transition, conflicting edit, or incompatible source prefix/model |
-| `Complete` | Raw appended result stays outside the edited prefix |
-| `SaveOutput`, `Persist`, `DeleteMirror` | Publish session-owned output before persisting its path; mirror cleanup does not delete it |
-| `Compact`, `Toggle` | Disabled or unavailable editing does not cancel compaction |
+`ProjectionEditing.tla` replaces the superseded native-body retention and native-order
+models. CLM editing, deletion, reordering, and whole-summary replacement must make
+progress across summaries, custom content, images, signed/thinking content, and plain
+history. Completed groups can disappear; retained groups stay exact unless the edit
+breaks their relationships. This is not an invariant that all historical native material
+must remain in the model view.
 
-The invariants cover fresh acceptance, native call/result conservation, durable
-references, and compaction transparency. This is an abstract finite safety check,
-not a proof of filesystem atomicity, parser behavior, or unbounded liveness.
-The TypeScript tests cover the actual parser, 16-snapshot expiry, late submissions
-across intervening requests, failure injection, and file lifetime.
+The one in-flight admission case is explicit: removing or changing an outstanding call
+rejects the proposal, including when its result is in a later unseen suffix. A fresh
+completed snapshot enables broad replacement. Unrelated edits retaining the call succeed.
+The raw archive, execution ledger/dispatch count, and unseen suffix remain unchanged.
+Conservative mode is modeled separately from default CLM mode.
+
+The checked finite instance passed **9,720 generated / 6,480 distinct states**. A diagnostic
+variant that restricts editing to plain content fails the progress invariant, so refusing
+all mixed-content edits is not a valid solution. The model does not prove implementation
+closure discovery, provider legality, or unbounded liveness.
+
+## Submission, artifacts, and compaction
+
+`ContextSafety.tla` models ordinary atomic file submission, independent context reads,
+accepted revisions, raw execution completion, and the lifetime of overflow artifacts.
+The obsolete equality between raw and projected native history has been removed: a
+projection is not execution state. `Consume` cannot execute a tool or change raw closure.
+The invariants cover fresh acceptance, disjoint pending/completed execution state,
+durable references, and compaction transparency when CLM is disabled or unavailable.
+
+The bounded instance has two context-read generations and at most two accepted or
+invalidated revisions: **56,811 generated / 6,276 distinct states**, no violations.
+TypeScript tests cover the actual metadata/source guards, 16-snapshot expiry, late
+submissions, failure injection, persistence, and file lifetime.
 
 ## Optional helper exposure
 
 `ToolExposure.tla` models default direct declarations, explicit code-mode callability,
-and invalid configuration refusing to load. It was checked before the exposure option
-was implemented: 16 generated states, 7 distinct, no invariant violations. This models
-the documented public SDK contract; a stock-SDK test checks the actual registry.
-
-From `spec/`:
-
-```sh
-java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
-  -config ToolExposure.cfg ToolExposure.tla
-```
-
-## Native ordering
-
-`NativeOrder.tla` models editable complete pairs, nonadjacent results, pending calls,
-and preexisting inverted/orphaned spans. It checks that reordering cannot introduce a
-native inversion, while protected source structure is conserved. Checked before the
-ordering fix: 395 generated states, 65 distinct, no invariant violations.
-
-From `spec/`:
-
-```sh
-java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
-  -config NativeOrder.cfg NativeOrder.tla
-```
-
-## Completed native result bodies
-
-`NativeBody.tla` separates a completed mapped text body from the exact assistant and
-result envelopes. Recognized public content cores may carry signatures or arbitrary
-extra metadata, all preserved exactly. Mapping the assistant is not required when the
-result maps independently. Unknown/malformed cores, pending/deferred/partial/unsettled
-assistants, duplicate/unmatched/inverted/name-mismatched groups, unvalidated public call identities,
-and opaque/unmapped results stay protected. Body edits, caps, and withholding preserve identity, metadata,
-and order; ordinary metadata-free text remains editable.
-
-Before the corresponding implementation, the refined finite model passed 346,178
-generated states and 31,398 distinct states. `BodyProgress` requires actual shortening
-of eligible bodies, not just safety through refusing every edit. Setting the diagnostic
-constant `OverprotectMetadata` to `TRUE` reproduces a two-state `BodyProgress` violation;
-the checked configuration sets it to `FALSE`. This model abstracts public-field parsing
-and group discovery; implementation tests check malformed fields, exact envelopes,
-source mapping, completed groups, caps, withholding, and rejected edits.
-
-From `spec/`:
-
-```sh
-java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
-  -config NativeBody.cfg NativeBody.tla
-```
+and invalid configuration refusing to load: **16 generated / 7 distinct states**, no
+violations. A stock-SDK test checks the actual public registry contract.

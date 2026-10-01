@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { applyContextDocument, renderContextDocument, renderMessage } from "../context-document.ts";
+import { mixedHistory } from "./fixtures/mixed-history.ts";
 import { systemGuidance } from "../presentation.ts";
 import type { LiveContextMessage } from "../types.ts";
 
@@ -66,5 +67,61 @@ describe("CLM editing policy over native live-context core", () => {
 		assert.match(prompt, /Growth and same-size edits are allowed/);
 		assert.match(prompt, /new-NAME/);
 		assert.doesNotMatch(prompt, /Default to surgical|only mutation|must make the complete projection smaller/);
+	});
+});
+
+
+describe("broad mixed-history model-view editing", () => {
+	const mode = { editingMode: "clm" as const };
+	function rendered() { return renderContextDocument(mixedHistory(), { protectedIndexes: new Set() }); }
+	function write(base: ReturnType<typeof rendered>, indexes: number[], edit = -1) {
+		return envelope(base.text) + indexes.map(i => `${base.blocks[i].header}\n${i === edit ? "Concise finding." : base.blocks[i].body}`).join("\n\n");
+	}
+	for (const index of [1, 2, 3, 4, 5, 6, 7]) {
+		for (const operation of ["edit", "delete"] as const) {
+			test(`${operation} ${["task", "compaction summary", "branch summary", "custom", "image", "signed/thinking", "native call", "native result"][index]}`, () => {
+				const base = rendered();
+				assert.ok(base.blocks.every(block => !block.protected));
+				const sourceDigest = JSON.stringify(base.messages);
+				const indexes = base.blocks.map(block => block.index).filter(i => operation !== "delete" || i !== index);
+				const result = applyContextDocument(write(base, indexes, operation === "edit" ? index : -1), base, mode);
+				assert.equal(result.accepted, true, result.reason);
+				assert.equal(result.editTrace?.sources[index].kind, operation === "edit" ? "edited" : "removed");
+				assert.equal(result.messages.includes(base.messages[index]), false);
+				if (operation === "edit") assert.match(renderMessage(result.messages[index]), /Concise finding/);
+				if (index === 6 || index === 7) {
+					assert.equal(result.messages.some(message => message.role === "toolResult"), false);
+					assert.equal(result.messages.some(message => Array.isArray(message.content) && message.content.some((part: any) => part.type === "toolCall")), false);
+				}
+				assert.equal(JSON.stringify(base.messages), sourceDigest, "raw source is not edited");
+			});
+		}
+	}
+	test("reordering a retained native group preserves every original envelope", () => {
+		const base = rendered();
+		const order = [6, 7, 5, 4, 3, 2, 1, 8, 0];
+		const result = applyContextDocument(write(base, order), base, mode);
+		assert.equal(result.accepted, true, result.reason);
+		assert.deepEqual(result.messages, order.map(index => base.messages[index]));
+	});
+	test("whole-summary replacement reclaims substantive mixed history", () => {
+		const base = rendered();
+		const result = applyContextDocument(`${base.text.split("\n")[0]}\nCurrent findings: ready for the next task.`, base, mode);
+		assert.equal(result.accepted, true, result.reason);
+		assert.equal(result.messages.length, 2);
+		assert.equal(result.messages[0], base.messages[0], "upstream summary shorthand retains the first user");
+		assert.equal(result.messages[1].role, "custom");
+		assert.match(renderMessage(result.messages[1]), /Current findings/);
+		assert.ok(result.savingsEstimate > 250000);
+		assert.ok(result.afterEstimate < result.beforeEstimate / 100);
+		assert.equal(result.editTrace?.sources.filter(source => source.kind === "removed").length, base.messages.length - 1);
+	});
+	test("first user and all historical blocks can also be removed explicitly", () => {
+		const base = rendered();
+		const note = `[[CTX_TURN document=${base.documentId} index=1 role=notes id=new-summary protected=false]]\nOnly the current finding.`;
+		const result = applyContextDocument(envelope(base.text) + note, base, mode);
+		assert.equal(result.accepted, true, result.reason);
+		assert.equal(result.messages.length, 1);
+		assert.match(renderMessage(result.messages[0]), /Only the current finding/);
 	});
 });
