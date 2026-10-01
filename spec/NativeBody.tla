@@ -5,7 +5,7 @@ VARIABLES mode, operation, body, envelope, assistant, ordinaryText, accepted, ap
 vars == <<mode, operation, body, envelope, assistant, ordinaryText, accepted, applied>>
 
 Modes == [core : {"plain", "signed", "metadata", "unknown", "malformed"},
-          assistantMapped : BOOLEAN, resultMapped : BOOLEAN,
+          assistantMapped : BOOLEAN, resultMapped : BOOLEAN, publicCallsKnown : BOOLEAN,
           closure : {"closed", "pending", "deferred", "partial", "duplicateCall",
                      "duplicateResult", "unmatched", "inverted", "nameMismatch", "unsettled"},
           resultContent : {"plain", "opaque"}]
@@ -16,7 +16,7 @@ OriginalEnvelope == [role |-> "toolResult", id |-> "call", name |-> "read",
 (* Mapping the assistant is not required: its whole envelope remains exact.
    Public required cores and authoritative closure, not extra metadata, admit a body. *)
 Eligible == mode.core \in {"plain", "signed", "metadata"}
-            /\ mode.resultMapped /\ mode.closure = "closed" /\ mode.resultContent = "plain"
+            /\ mode.resultMapped /\ mode.publicCallsKnown /\ mode.closure = "closed" /\ mode.resultContent = "plain"
 CanEditBody == Eligible /\ ~(OverprotectMetadata /\ mode.core = "metadata")
 
 Init == /\ mode \in Modes /\ operation = "body" /\ body = "large"

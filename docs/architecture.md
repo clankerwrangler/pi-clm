@@ -69,7 +69,7 @@ Protection is conservative:
   and opaque/unmapped results stay protected with their related native endpoints.
   Signatures and extra fields on valid public assistant blocks are immutable envelope
   metadata, not new content types. The entire assistant stays exact while a separately
-  mapped plain-text result may shrink after a successful terminal state (`stop`, `toolUse`,
+  mapped plain-text result may shrink after a supported terminal state (`stop`, `toolUse`,
   or `length`), unique group completion, and matching tool names. Extra metadata never
   establishes completion. Ordinary metadata-free assistant text remains editable.
 - Such results retain their native role, call ID, tool name, metadata, and valid order.

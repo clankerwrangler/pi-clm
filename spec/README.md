@@ -64,12 +64,12 @@ java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
 result envelopes. Recognized public content cores may carry signatures or arbitrary
 extra metadata, all preserved exactly. Mapping the assistant is not required when the
 result maps independently. Unknown/malformed cores, pending/deferred/partial/unsettled
-assistants, duplicate/unmatched/inverted/name-mismatched groups, and opaque/unmapped
-results stay protected. Body edits, caps, and withholding preserve identity, metadata,
+assistants, duplicate/unmatched/inverted/name-mismatched groups, unvalidated public call identities,
+and opaque/unmapped results stay protected. Body edits, caps, and withholding preserve identity, metadata,
 and order; ordinary metadata-free text remains editable.
 
-Before the corresponding implementation, the refined finite model passed 174,178
-generated states and 15,798 distinct states. `BodyProgress` requires actual shortening
+Before the corresponding implementation, the refined finite model passed 346,178
+generated states and 31,398 distinct states. `BodyProgress` requires actual shortening
 of eligible bodies, not just safety through refusing every edit. Setting the diagnostic
 constant `OverprotectMetadata` to `TRUE` reproduces a two-state `BodyProgress` violation;
 the checked configuration sets it to `FALSE`. This model abstracts public-field parsing

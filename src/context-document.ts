@@ -388,21 +388,23 @@ export function intrinsicProtectedIndexes(messages: LiveContextMessage[], requir
 			protectedIndexes.add(index);
 			if (!knownRole || nonTextResult || pending || message.role !== "assistant" || !knownAssistantCore(message)) fullGroup.add(index);
 		}
-		// Duplicate native IDs inside one assistant message are ambiguous too.
+		// Duplicate IDs, including alternate legacy declarations, are ambiguous too.
 		if (Array.isArray(message.content)) {
 			const nativeCalls = message.content.filter((part) => part && typeof part === "object" && (part as { type?: unknown }).type === "toolCall");
-			if (nativeCalls.length > toolCallIds(message).size) fullGroup.add(index);
+			const legacyCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+			if (nativeCalls.length + legacyCalls.length > toolCallIds(message).size) fullGroup.add(index);
 		}
 	}
 	for (const [index, message] of messages.entries()) {
 		const ids = toolCallIds(message);
 		if (ids.size === 0) continue;
 		const exactAssistant = message.role === "assistant" && protectedIndexes.has(index);
+		const publicCallNames = new Map(contentToolCalls(message).map((call) => [call.id, call.name]));
 		// Body-only admission needs an authoritative terminal state and matching names.
 		// Keep legacy metadata-free pair editing separate from this exact-envelope path.
-		const unsettled = exactAssistant && !["stop", "toolUse", "length"].includes(String(message.stopReason));
+		const unsettled = exactAssistant && !(typeof message.stopReason === "string" && ["stop", "toolUse", "length"].includes(message.stopReason));
 		const incomplete = [...ids].some((id) => calls.get(id)?.length !== 1 || results.get(id)?.length !== 1 || results.get(id)![0] < index ||
-			(exactAssistant && messages[results.get(id)![0]].toolName !== contentToolCalls(message).find((call) => call.id === id)?.name));
+			(exactAssistant && (!publicCallNames.has(id) || messages[results.get(id)![0]].toolName !== publicCallNames.get(id))));
 		const opaque = unsettled || fullGroup.has(index) || [...ids].some((id) => results.get(id)?.some((i) => protectedIndexes.has(i)));
 		if (incomplete || opaque) {
 			protectedIndexes.add(index);
