@@ -138,6 +138,18 @@ While disabled or unavailable, CLM never cancels native compaction. When enabled
 pauses threshold compaction only while the guard enforces a budget; `off` pauses automatic
 compaction, and `on` leaves Pi alone. Manual compaction is never cancelled.
 
+On hosts that emit `persistent-harness:automatic-compaction-check`, CLM applies this
+policy before stock preparation. The public event bus carries a frozen
+`{ version: 1, reason, contextWindow, veto }` request; `reason` is `threshold` or
+`overflow`. The listener reads current enablement, mirror availability, branch settings,
+and the supplied model window, then calls `veto()` synchronously when needed. The query
+adds no notice or history entry. The same predicate governs `session_before_compact`,
+which retains its notifications for stock Pi and hosts without the early query.
+
+The SDK runtime tracks the listener and removes it on invalidation. Supported reload
+owners invalidate the old runtime before reloading resources; a raw resource-loader
+reload alone does not remove old subscriptions.
+
 ## Settings and presentation
 
 Environment values establish load-time defaults. Branch-persisted overrides are managed

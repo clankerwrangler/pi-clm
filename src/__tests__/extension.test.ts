@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { LIVE_CONTEXT_ANNOTATION, sourceContentHash } from "../continuity.ts";
 import liveContextExtension from "../index.ts";
@@ -59,6 +59,7 @@ function createHarness(initialBranch: any[] = []): Harness {
 	const sentMessages: Array<{ customType: string; content: unknown; display: boolean; details?: unknown; options?: unknown }> = [];
 
 	const pi = {
+		events: createEventBus(),
 		on(name: string, handler: Handler) {
 			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 		},
@@ -1831,6 +1832,7 @@ describe("async file submissions and independent safety", () => {
 		liveContextExtension(harness.pi, { editingMode: "clm", nativeCompaction: "off" });
 		await emit(harness, "session_start", {});
 		for (const reason of ["manual", "threshold", "overflow"]) assert.deepEqual(await emit(harness, "session_before_compact", { reason }), [undefined]);
+		for (const reason of ["threshold", "overflow"]) assert.equal(earlyCompactionVeto(harness, reason, 272000), false);
 		failed.mock.restore();
 		await emit(harness, "session_shutdown", {});
 	});
@@ -1954,3 +1956,72 @@ for (const extraMetadata of [false, true]) for (const sourceMapping of ["mapped"
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 }
+
+
+const automaticCompactionChannel = "persistent-harness:automatic-compaction-check";
+function earlyCompactionVeto(harness: Harness, reason: string, contextWindow: number | undefined): boolean {
+  let vetoed = false;
+  harness.pi.events.emit(automaticCompactionChannel, Object.freeze({ version: 1, reason, contextWindow,
+    veto: () => { vetoed = true; },
+  }));
+  return vetoed;
+}
+
+test("early synchronous permission matches late policy across modes, reasons, budgets and current model windows", async () => {
+  for (const editingMode of ["clm", "conservative"] as const)
+  for (const nativeCompaction of ["auto", "off", "on"] as const)
+  for (const mode of ["withhold", "off"] as const)
+  for (const contextBudget of [undefined, 6000]) {
+    const harness = createHarness();
+    liveContextExtension(harness.pi, { editingMode, nativeCompaction, overflow: { mode }, budget: { contextBudget } });
+    assert.equal(earlyCompactionVeto(harness, "threshold", 100000), false, "no mirror before startup");
+    await emit(harness, "session_start", {});
+    try {
+      for (const contextWindow of [undefined, 100000, 272000, 0, -1, NaN, Infinity]) {
+        harness.ctx.model = { contextWindow };
+        for (const reason of ["manual", "threshold", "overflow"]) {
+          const expected = editingMode === "clm" && reason !== "manual" && (nativeCompaction === "off" ||
+            (nativeCompaction === "auto" && reason === "threshold" && mode !== "off" &&
+              (contextBudget !== undefined || (contextWindow !== undefined && Number.isFinite(contextWindow) && contextWindow > 0))));
+          const notifications = harness.notifications.length, entries = structuredClone(harness.branch);
+          assert.equal(earlyCompactionVeto(harness, reason, contextWindow), expected);
+          assert.equal(harness.notifications.length, notifications, "early check is silent");
+          assert.deepEqual(harness.branch, entries, "early check does not write state");
+          assert.equal(Boolean((await emit(harness, "session_before_compact", { reason }))[0]?.cancel), expected);
+        }
+      }
+    } finally { await emit(harness, "session_shutdown", {}); }
+    assert.equal(earlyCompactionVeto(harness, "threshold", 100000), false, "disposed mirror");
+  }
+});
+
+test("early permission reads config, enablement and restored branch state freshly", async () => {
+  const harness = createHarness();
+  liveContextExtension(harness.pi, { editingMode: "clm" });
+  await emit(harness, "session_start", {});
+  const check = (reason = "threshold", window: number | undefined = 100000) => earlyCompactionVeto(harness, reason, window);
+  const command = (args: string) => harness.commands.get("clm").handler(args, harness.ctx);
+  try {
+    assert.equal(check(), true);
+    await command("off"); assert.equal(check(), false);
+    await command("on"); assert.equal(check(), true);
+    await command("config compaction on"); assert.equal(check(), false);
+    await command("config compaction off"); assert.equal(check("overflow"), true);
+    await command("config compaction auto"); assert.equal(check("overflow"), false);
+    await command("config guard off"); assert.equal(check(), false);
+    await command("config guard withhold"); assert.equal(check(), true);
+    assert.equal(earlyCompactionVeto(harness, "threshold", undefined), false);
+    const beforeBudget = harness.branch.length;
+    await command("config budget 6k");
+    assert.equal(earlyCompactionVeto(harness, "threshold", undefined), true);
+    harness.branch.splice(beforeBudget);
+    await emit(harness, "session_tree", {});
+    assert.equal(earlyCompactionVeto(harness, "threshold", undefined), false);
+    assert.equal(check(), true);
+    let malformedVetoes = 0;
+    for (const request of [null, {}, { version: 2, reason: "threshold" }, { version: 1, reason: "manual" }]) {
+      harness.pi.events.emit(automaticCompactionChannel, request && { ...request, veto: () => malformedVetoes++ });
+    }
+    assert.equal(malformedVetoes, 0);
+  } finally { await emit(harness, "session_shutdown", {}); }
+});

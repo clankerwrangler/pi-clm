@@ -7,7 +7,7 @@ implementation and integration tests cover those boundaries separately.
 From `spec/`, set `TLA_TOOLS_JAR` to the local TLA+ tools jar:
 
 ```sh
-for model in ProjectionEditing ContextSafety ToolExposure Maintenance; do
+for model in ProjectionEditing ContextSafety ToolExposure Maintenance AutomaticCompactionPolicy; do
   java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
     -config "$model.cfg" "$model.tla"
 done
@@ -51,6 +51,15 @@ The bounded instance has two context-read generations and at most two accepted o
 invalidated revisions: **56,811 generated / 6,276 distinct states**, no violations.
 TypeScript tests cover the actual metadata/source guards, 16-snapshot expiry, late
 submissions, failure injection, persistence, and file lifetime.
+
+## Automatic compaction policy
+
+`AutomaticCompactionPolicy.tla` covers current enablement, mirror availability, editing
+mode, native policy, budget/window availability, guard mode, and compaction reason.
+Early and late decisions agree after policy changes; manual, disabled, unavailable,
+and explicitly permitted paths remain available. The finite instance passed
+**112,128 generated / 1,536 distinct states**. It abstracts callback scheduling and
+runtime subscription lifetime; public event-bus integration tests cover those boundaries.
 
 ## Maintenance command
 

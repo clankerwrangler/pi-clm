@@ -1484,8 +1484,25 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		return { messages: asAgentMessages(output) };
 	}
 
+	// Read current closure state for both the early permission query and stock Pi's late hook.
+	function vetoAutomaticCompaction(reason: string, contextWindow: number | undefined): boolean {
+		if (!state.enabled || !store || editingMode !== "clm" || nativeCompaction === "on" || reason === "manual") return false;
+		if (nativeCompaction === "off") return true;
+		// Raw-history threshold compaction discards the projection; the budget/guard
+		// substitutes for it. Provider overflow recovery remains Pi's last resort.
+		return reason === "threshold" && overflowGuard.mode !== "off" && Boolean(resolveBudget(budgetPolicy, contextWindow));
+	}
+
+	// Synchronous by contract: no work, notice, or state mutation before the veto.
+	// The SDK runtime owns this subscription and removes it on invalidation.
+	pi.events.on("persistent-harness:automatic-compaction-check", (data: unknown) => {
+		const request = data as { version?: unknown; reason?: unknown; contextWindow?: unknown; veto?: unknown } | null;
+		if (!request || request.version !== 1 || (request.reason !== "threshold" && request.reason !== "overflow") || typeof request.veto !== "function") return;
+		if (vetoAutomaticCompaction(request.reason as string, typeof request.contextWindow === "number" ? request.contextWindow : undefined)) request.veto();
+	});
+
 	pi.on("session_before_compact", async (event, ctx) => {
-		if (!state.enabled || !store || editingMode !== "clm" || nativeCompaction === "on" || event.reason === "manual") return undefined;
+		if (!vetoAutomaticCompaction(event.reason, ctx.model?.contextWindow)) return undefined;
 		if (nativeCompaction === "off") {
 			queueOutcomeNotice(
 				`Pi's automatic compaction (${event.reason}) was cancelled: pi-clm manages this context. Edit the mirror to free space.`,
@@ -1493,14 +1510,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			ctx.ui.notify(`pi-clm: cancelled Pi's ${event.reason} compaction (PI_CLM_NATIVE_COMPACTION=off).`, "info");
 			return { cancel: true };
 		}
-		// auto: Pi measures the raw transcript, which CLM never shrinks, and its summary keeps
-		// ~20k recent raw tokens — on a small window that re-admits more than the projection
-		// held and discards the model's edits. While pi-clm has a budget to enforce, the
-		// overflow guard is the substitute for threshold compaction; only overflow recovery
-		// (after a provider-side failure) is left to Pi as the last resort.
-		if (event.reason !== "threshold") return undefined;
-		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow);
-		if (!resolved || overflowGuard.mode === "off") return undefined;
+		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow)!;
 		const effective = currentContextView
 			? calibrator.apply(estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + currentContextView.effectiveTokens)
 			: undefined;
