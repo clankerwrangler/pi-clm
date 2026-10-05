@@ -28,7 +28,12 @@ completed snapshot enables broad replacement. Unrelated edits retaining the call
 The raw archive, execution ledger/dispatch count, and unseen suffix remain unchanged.
 Conservative mode is modeled separately from default CLM mode.
 
-The checked finite instance passed **9,720 generated / 6,480 distinct states**. A diagnostic
+Headerless summaries contain only the authored note, and empty replacement removes all
+snapshot messages. Neither form inserts the original task. Unseen suffixes remain exact;
+open calls still require the in-flight admission rule. The first-user-restoration negative
+control fails `SummaryProgress`.
+
+The checked finite instance passed **11,664 generated / 7,776 distinct states**. A diagnostic
 variant that restricts editing to plain content fails the progress invariant, so refusing
 all mixed-content edits is not a valid solution. The model does not prove implementation
 closure discovery, provider legality, or unbounded liveness.

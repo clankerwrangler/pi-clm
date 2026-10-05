@@ -17,7 +17,8 @@ provider credentials. Local mock lifecycle tests are not evidence of a live prov
 
 [spec/README.md](../spec/README.md) documents the finite TLA+ models, checked before the
 corresponding implementation, and their limitations. Set `TLA_TOOLS_JAR` to a local TLA+ tools jar. Current receipts use TLC
-2026.09.04.170753. No model checker is downloaded by tests.
+2026.09.04.170753; the headerless-replacement update also passes with TLC 2.19
+(2024-08-08). No model checker is downloaded by tests.
 
 ## Try a checkout
 

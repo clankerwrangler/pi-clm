@@ -5,7 +5,7 @@ VARIABLES category, mode, closed, fresh, suffix, operation, target,
 vars == <<category, mode, closed, fresh, suffix, operation, target,
           archive, execution, projected, accepted, applied>>
 Categories == {"summary", "branchSummary", "custom", "image", "signedThinking", "plain"}
-Operations == {"keep", "edit", "delete", "reorder", "summary"}
+Operations == {"keep", "edit", "delete", "reorder", "summary", "empty"}
 Source == IF closed THEN <<"task", "call", category, "result", "latest">>
           ELSE <<"task", "call", category, "latest">>
 OriginalExecution == [call |-> IF closed THEN "completed" ELSE "pending", dispatches |-> 1]
@@ -15,7 +15,8 @@ Draft == CASE operation = "keep" -> Source
            [] operation = "edit" -> Replace(Source, target, "note")
            [] operation = "delete" -> Delete(Source, target)
            [] operation = "reorder" -> [i \in 1..Len(Source) |-> Source[Len(Source) + 1 - i]]
-           [] OTHER -> <<"task", "summaryNote">>
+           [] operation = "summary" -> <<"summaryNote">>
+           [] OTHER -> <<>>
 Index(s, value) == CHOOSE i \in 1..Len(s) : s[i] = value
 Has(s, value) == value \in {s[i] : i \in 1..Len(s)}
 (* A missing result is legal only if it was not present in the snapshot. *)
@@ -45,7 +46,8 @@ FreshOnly == accepted => fresh
 InFlightAdmission == applied /\ ~closed /\ ~Has(Proposed, "call") => ~accepted /\ projected = Source \o suffix
 BroadProgress == applied /\ fresh /\ closed /\ mode = "clm" => accepted /\ projected = Proposed \o suffix
 UnrelatedProgress == applied /\ fresh /\ ~closed /\ mode = "clm" /\ InFlightSafe => accepted
-SummaryProgress == applied /\ fresh /\ closed /\ mode = "clm" /\ operation = "summary" => projected = <<"task", "summaryNote">> \o suffix
+SummaryProgress == applied /\ fresh /\ closed /\ mode = "clm" /\ operation = "summary" => projected = <<"summaryNote">> \o suffix
+EmptyProgress == applied /\ fresh /\ closed /\ mode = "clm" /\ operation = "empty" => projected = suffix
 RetainedExact == applied /\ operation = "keep" => projected = Source \o suffix
 ReplayOrder == accepted /\ Has(Proposed, "result") => Has(Proposed, "call") /\ Index(Proposed, "call") < Index(Proposed, "result")
 =============================================================================

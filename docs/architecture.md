@@ -78,9 +78,12 @@ otherwise contain an orphan. Unrelated edits that retain the call remain availab
 There is no deferred submission queue, archive rewrite, or tool execution/replay path.
 A fully represented completed exchange can be deleted or replaced by a summary.
 
-A headerless summary still requires the exact metadata line. Following upstream, it
-retains the first user turn and adds one notes block; explicit block deletion plus a new
-notes block can replace even that first turn. Both forms reclaim the rest of mixed history.
+In CLM mode, a headerless summary requires the exact metadata line and replaces every
+original block with one authored notes block. Metadata alone replaces the snapshot with
+an empty message list, like an explicit empty-block edit. No original user message is
+retained automatically. The same in-flight call rule applies to both forms. Conservative
+mode retains its first/latest-user protection and shrink requirement, including when
+all block headers are removed.
 
 | Policy | Conservative | CLM (package entry) |
 |---|---|---|

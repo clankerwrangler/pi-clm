@@ -1685,7 +1685,7 @@ describe("async file submissions and independent safety", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
-	test("whole mixed-history replacement persists, resumes, and preserves appended unseen suffix", async () => {
+	for (const summary of ["Current findings: ready for the next task.", ""]) test(`${summary ? "Summary" : "Empty"} replacement persists, resumes, and preserves appended unseen suffix`, async () => {
 		const harness = createHarness();
 		liveContextExtension(harness.pi, { editingMode: "clm", overflow: { mode: "off" } });
 		await emit(harness, "session_start", {});
@@ -1697,16 +1697,16 @@ describe("async file submissions and independent safety", () => {
 			await emit(harness, "context", { messages: raw });
 			const mirror = await readFile(path, "utf8");
 			assert.doesNotMatch(mirror, /protected=true/);
-			const draft = `${mirror.split("\n")[0]}\nCurrent findings: ready for the next task.`;
+			const draft = `${mirror.split("\n")[0]}\n${summary}`;
 			const suffix = [{ role: "user", content: "Arrived after the draft.", timestamp: 20 }];
 			await emit(harness, "context", { messages: [...raw, ...suffix] });
 			const sourceEntries = structuredClone(harness.branch);
 			await submit(path, draft);
 			const result = (await nextRequest(harness))[0].messages;
 			const checkpoint = harness.branch.at(-1).data.checkpoint;
-			assert.equal(checkpoint.projectedMessages.length, 2);
+			assert.equal(checkpoint.projectedMessages.length, summary ? 1 : 0);
 			assert.ok(JSON.stringify(checkpoint.projectedMessages).length < JSON.stringify(raw).length / 100);
-			assert.deepEqual(result.slice(2, 3), suffix);
+			assert.deepEqual(result.slice(checkpoint.projectedMessages.length, checkpoint.projectedMessages.length + 1), suffix);
 			assert.deepEqual(raw, saved);
 			assert.deepEqual(harness.branch.slice(0, sourceEntries.length), sourceEntries);
 			const resumed = createHarness(structuredClone(harness.branch));
@@ -1719,7 +1719,7 @@ describe("async file submissions and independent safety", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
-	for (const unseenResult of [false, true]) for (const change of ["edit", "delete", "summary"] as const) {
+	for (const unseenResult of [false, true]) for (const change of ["edit", "delete", "summary", "empty"] as const) {
 		test(`${change} of snapshot outstanding call rejects${unseenResult ? " even after an unseen result arrives" : " before completion"}; a fresh completed snapshot can summarize`, async () => {
 			const { harness, path } = await started();
 			try {
@@ -1728,7 +1728,7 @@ describe("async file submissions and independent safety", () => {
 				const saved = structuredClone(raw);
 				await emit(harness, "context", { messages: raw });
 				const mirror = await readFile(path, "utf8");
-				const draft = change === "summary" ? `${mirror.split("\n")[0]}\nComplete summary.` : mirror.replace(
+				const draft = change === "empty" ? mirror.split("\n")[0] : change === "summary" ? `${mirror.split("\n")[0]}\nComplete summary.` : mirror.replace(
 					/(\[\[CTX_TURN document=[a-f0-9]{64} index=2 role=assistant[^\n]*\]\]\n)[\s\S]*$/,
 					change === "edit" ? "$1Changed pending call." : "",
 				);

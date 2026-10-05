@@ -62,6 +62,15 @@ describe("CLM editing policy over native live-context core", () => {
 		assert.equal(result.accepted, false);
 		assert.equal(applyContextDocument(base.text.replace("original task", "X"), base).messages[0], raw[0]);
 	});
+	test("conservative headerless edits retain both user turns and still require shrinking", () => {
+		const base = renderContextDocument(raw);
+		for (const body of ["Brief.", ""]) {
+			const result = applyContextDocument(`${base.text.split("\n")[0]}\n${body}`, base);
+			assert.equal(result.accepted, true, result.reason);
+			assert.deepEqual(result.messages.filter(message => message.role === "user"), [raw[0], raw[2]]);
+		}
+		assert.equal(applyContextDocument(`${base.text.split("\n")[0]}\n${"Long summary.".repeat(20)}`, base).accepted, false);
+	});
 	test("CLM prompt does not prescribe surgical shrinking or a one-write rule", () => {
 		const prompt = systemGuidance("/tmp/context", "clm");
 		assert.match(prompt, /Growth and same-size edits are allowed/);
@@ -104,17 +113,28 @@ describe("broad mixed-history model-view editing", () => {
 		assert.equal(result.accepted, true, result.reason);
 		assert.deepEqual(result.messages, order.map(index => base.messages[index]));
 	});
-	test("whole-summary replacement reclaims substantive mixed history", () => {
+	test("headerless summary replaces every original mixed-history message", () => {
 		const base = rendered();
 		const result = applyContextDocument(`${base.text.split("\n")[0]}\nCurrent findings: ready for the next task.`, base, mode);
 		assert.equal(result.accepted, true, result.reason);
-		assert.equal(result.messages.length, 2);
-		assert.equal(result.messages[0], base.messages[0], "upstream summary shorthand retains the first user");
-		assert.equal(result.messages[1].role, "custom");
-		assert.match(renderMessage(result.messages[1]), /Current findings/);
+		assert.equal(result.messages.length, 1);
+		assert.equal(result.messages[0].role, "custom");
+		assert.equal(renderMessage(result.messages[0]), "Current findings: ready for the next task.");
 		assert.ok(result.savingsEstimate > 250000);
 		assert.ok(result.afterEstimate < result.beforeEstimate / 100);
-		assert.equal(result.editTrace?.sources.filter(source => source.kind === "removed").length, base.messages.length - 1);
+		assert.equal(result.editTrace?.sources.filter(source => source.kind === "removed").length, base.messages.length);
+	});
+	test("metadata-only and explicit empty replacements remove all completed history", () => {
+		const base = rendered();
+		const metadata = base.text.split("\n")[0];
+		const emptyBlock = `[[CTX_TURN document=${base.documentId} index=1 role=notes id=new-empty protected=false]]`;
+		for (const draft of [metadata, `${envelope(base.text)}\n`, `${metadata}\n${emptyBlock}\n`]) {
+			const result = applyContextDocument(draft, base, mode);
+			assert.equal(result.accepted, true, result.reason);
+			assert.deepEqual(result.messages, []);
+			assert.deepEqual(result.editTrace?.additions, []);
+			assert.equal(result.editTrace?.sources.filter(source => source.kind === "removed").length, base.messages.length);
+		}
 	});
 	test("first user and all historical blocks can also be removed explicitly", () => {
 		const base = rendered();

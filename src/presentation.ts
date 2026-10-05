@@ -93,9 +93,9 @@ edit would remove or change that call, it is rejected: read a fresh completed sn
 Unrelated edits can proceed while calls are outstanding.
 ${editingMode === "clm" ? `Edit, delete, reorder, or add blocks, including summaries, images, and completed tool exchanges. To add a block, copy a current header,
 use a unique id=new-NAME, protected=false, and a role label such as notes. To replace
-the conversation with a summary, keep only the metadata line followed by your summary;
-only the first user turn survives beside the summary. To replace that too, use a new notes
-block and remove the old blocks. Growth and same-size edits are allowed.` :
+the snapshot with a summary, keep only the metadata line followed by your summary.
+No original messages are retained automatically. Metadata alone submits an empty
+replacement. Later messages outside the snapshot stay unchanged. Growth and same-size edits are allowed.` :
 `Default to surgical edits that shrink context. Preserve message order and complete user/assistant exchanges.
 Keep both user and assistant messages exactly when asked to preserve them.
 First/latest user messages are protected. Batch related edits in one draft.`}

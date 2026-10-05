@@ -42,9 +42,10 @@ In default CLM mode, all historical blocks may shrink, grow, be removed, or be r
 including summaries, images, custom messages, signed/thinking assistants, and completed
 tool exchanges. New blocks use `id=new-…`; their role labels are descriptive text, not
 system-message authority. For a whole-context summary, keep the exact metadata line
-and replace all turn headers and bodies with your summary. This upstream shorthand keeps
-the first user turn plus one notes block. To replace the first user turn too, insert a
-new notes block and remove all original blocks explicitly.
+and replace all turn headers and bodies with your summary. Only the authored summary
+remains; no original user or other messages are inserted automatically. To submit an
+empty replacement, keep only the metadata line. Messages appended after the selected
+snapshot stay unchanged.
 
 Unchanged native groups retain their original structure, even with nonadjacent results.
 Editing or partially deleting a completed group can turn its remaining call/result

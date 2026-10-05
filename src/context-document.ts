@@ -507,9 +507,8 @@ export function applyContextDocument(
 				`The first line must be exactly: ${metadataLine}`,
 		);
 	}
-	// CLM: a file with no current block headers at all is the model replacing its whole
-	// context with free text (the paper's "collapse to a summary" move). Accept it as one
-	// notes block, keeping the first user turn so the task statement survives.
+	// In CLM mode, headerless text replaces the selected snapshot without retaining
+	// any original messages. Metadata alone is the equivalent empty replacement.
 	if (options.editingMode === "clm" && parsed.blocks.length === 0 && editedText.trim().length > 0) {
 		const body = unescapeStructuralLines(
 			editedText
@@ -518,26 +517,13 @@ export function applyContextDocument(
 				.join("\n")
 				.trim(),
 		);
-		if (body.length === 0) return rejected(snapshot, beforeEstimate, "Mirror is empty after removing metadata; nothing to apply.");
-		const candidate: LiveContextMessage[] = [];
-		const candidateOrigins: Array<{ sourceIndex?: number; kind: ContextEditSourceKind | "added" }> = [];
-		const removedSourceIndexes = new Set<number>();
-		const firstUserIndex = snapshot.messages.findIndex((message) => message.role === "user");
-		for (const [index, message] of snapshot.messages.entries()) {
-			if (index === firstUserIndex) {
-				candidate.push(message);
-				candidateOrigins.push({ sourceIndex: index, kind: "kept" });
-			} else {
-				removedSourceIndexes.add(index);
-			}
-		}
-		candidate.push(contextNote(body, undefined, "notes"));
-		candidateOrigins.push({ kind: "added" });
-		return finalize(candidate, candidateOrigins, removedSourceIndexes, [
-			"Accepted a headerless rewrite: every block was replaced by one notes block" +
-				(firstUserIndex >= 0 ? " after the first user turn" : "") +
-				". To edit blocks individually, keep the [[CTX_TURN ...]] headers.",
-		]);
+		return finalize(
+			body ? [contextNote(body, undefined, "notes")] : [],
+			body ? [{ kind: "added" }] : [],
+			new Set(snapshot.messages.map((_, index) => index)),
+			[body ? "Accepted a headerless rewrite: every block was replaced by one notes block."
+				: "Accepted an empty replacement."],
+		);
 	}
 
 	if (parsed.duplicateIds.length > 0) {
