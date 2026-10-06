@@ -490,8 +490,15 @@ export function applyContextDocument(
 		};
 	};
 
-	const parsed = parseDocument(editedText, snapshot);
 	const metadataLine = snapshot.text.split("\n")[0] ?? "";
+	if (options.editingMode === "clm" && options.allowPlainText && editedText.trim() &&
+		!/^\[\[(?:LIVE_CONTEXT|CTX_TURN) /m.test(editedText)) {
+		const task = snapshot.blocks.find((block) => block.role === "user");
+		editedText = [metadataLine, task ? `${task.header}\n${task.body}` : "",
+			`[[CTX_TURN document=${snapshot.documentId} index=${snapshot.blocks.length + 1} role=notes id=new-summary protected=false]]\n${escapeStructuralLines(editedText.trim())}`,
+		].filter(Boolean).join("\n\n");
+	}
+	const parsed = parseDocument(editedText, snapshot);
 	// Submission identifies one exact immutable snapshot, even with a caller-supplied seed.
 	const baselineMatches = parsed.baselineDigest === snapshot.baselineDigest;
 	if (

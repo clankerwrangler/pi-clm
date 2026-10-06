@@ -3,9 +3,9 @@
 pi-clm lets the model edit its future conversational context without rewriting Pi's
 session history. It uses stock Pi public APIs and ordinary local file operations.
 
-## Snapshot and submission
+## Editing the mirror
 
-Before each request, pi-clm writes a private `LIVE_CONTEXT.md` snapshot:
+pi-clm publishes a private `LIVE_CONTEXT.md` snapshot:
 
 ```text
 [[LIVE_CONTEXT version=1 revision=2 document=<nonce> baseline=<digest>]]
@@ -18,30 +18,28 @@ TASK TRACKER
 - ...
 ```
 
-1. Read or copy one snapshot into a private draft beside the mirror.
-2. Edit the draft with Bash, Python, or another ordinary file tool. Keep its first
-   metadata line exactly, together with the headers of retained blocks.
-3. Close the completed draft, then **atomically rename** it to `LIVE_CONTEXT.commit.md`
-   in the same directory. Do not write that submission path incrementally.
-4. The next context request claims and validates the submission. A `[LIVE CONTEXT]`
-   notice reports acceptance or rejection. Saving or finishing a tool is not acceptance.
+Edit this file with Bash, Python, or another ordinary file tool. Keep the metadata line
+and retained block headers unchanged. Completed edits are validated before the next
+request; a `[LIVE CONTEXT]` notice reports acceptance or rejection. At agent settlement,
+completed edits are also validated and saved when the canonical source matches their
+snapshot. Otherwise validation waits for the next context request. Accepted edits survive
+reopening the session.
 
-The mirror itself is read-only input to this protocol: direct changes to it are ignored.
-Explicit submission prevents a request or turn-end event from accepting a partially
-written file while an asynchronous editor is still running. Only one submission slot
-exists; do not submit competing drafts concurrently.
+The mirror stays on the same snapshot while tools run. New requests continue without
+waiting for the writer, and messages appended after that snapshot remain unchanged.
+If an edit conflicts with the current source, model, or revision, read the refreshed
+mirror before retrying. An unsuccessful writing invocation does not activate its edit.
 
-The last **16 request snapshots** of the current accepted revision remain eligible.
-Unrelated requests and new raw messages do not conflict: an older draft can be accepted
-while preserving all messages appended after its source prefix. A conflicting accepted
-edit, changed source prefix/model, branch transition, reset, disabling, reload, or snapshot
-expiry rejects the old draft. Read the new mirror and prepare a new draft after rejection.
-Submissions are limited to 16 MiB.
+Detached writers can instead publish a completed private draft by atomic rename to
+`LIVE_CONTEXT.commit.md`. This optional path retains the last 16 published snapshots;
+it uses the same validator as direct edits. See the [lifecycle reference](architecture.md#request-and-submission-lifecycle)
+for completion, snapshot, and file-publication requirements.
 
 In default CLM mode, all historical blocks may shrink, grow, be removed, or be reordered,
 including summaries, images, custom messages, signed/thinking assistants, and completed
 tool exchanges. New blocks use `id=new-…`; their role labels are descriptive text, not
-system-message authority. For a whole-context summary, keep the exact metadata line
+system-message authority. Plain text with no headers replaces the snapshot with the
+original task followed by a notes block. For an unrestricted whole-context summary, keep the exact metadata line
 and replace all turn headers and bodies with your summary. Only the authored summary
 remains; no original user or other messages are inserted automatically. To submit an
 empty replacement, keep only the metadata line. Messages appended after the selected

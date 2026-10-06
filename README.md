@@ -2,7 +2,7 @@
 
 `pi-clm` is a [Pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 extension for model-managed context. The model edits a local conversation snapshot with
-ordinary file tools, then submits it atomically. Accepted edits change the next request,
+ordinary file tools. Accepted edits change the next request,
 not the canonical session history.
 
 This independent fork of [lolipopshock/pi-clm](https://github.com/lolipopshock/pi-clm)

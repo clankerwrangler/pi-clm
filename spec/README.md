@@ -7,7 +7,7 @@ implementation and integration tests cover those boundaries separately.
 From `spec/`, set `TLA_TOOLS_JAR` to the local TLA+ tools jar:
 
 ```sh
-for model in ProjectionEditing ContextSafety ToolExposure Maintenance AutomaticCompactionPolicy; do
+for model in ProjectionEditing ContextSafety MirrorLifecycle FinalBoundary ToolExposure Maintenance AutomaticCompactionPolicy; do
   java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
     -config "$model.cfg" "$model.tla"
 done
@@ -28,7 +28,7 @@ completed snapshot enables broad replacement. Unrelated edits retaining the call
 The raw archive, execution ledger/dispatch count, and unseen suffix remain unchanged.
 Conservative mode is modeled separately from default CLM mode.
 
-Headerless summaries contain only the authored note, and empty replacement removes all
+Metadata-bound headerless summaries contain only the authored note, and empty replacement removes all
 snapshot messages. Neither form inserts the original task. Unseen suffixes remain exact;
 open calls still require the in-flight admission rule. The first-user-restoration negative
 control fails `SummaryProgress`.
@@ -51,6 +51,29 @@ The bounded instance has two context-read generations and at most two accepted o
 invalidated revisions: **56,811 generated / 6,276 distinct states**, no violations.
 TypeScript tests cover the actual metadata/source guards, 16-snapshot expiry, late
 submissions, failure injection, persistence, and file lifetime.
+
+## Direct mirror lifecycle
+
+`MirrorLifecycle.tla` checks tool admission during context I/O, partial writes, terminal
+failure followed by process exit, canonical result visibility, generation revalidation,
+source/revision conflicts, lifecycle reset, and independent atomic publication. Two tool
+identities and bounded generations produce **5,639,601 generated / 1,193,772 distinct
+states**, with no invariant violations. A context operation never waits for live tools;
+new tool admission waits only for an existing context operation.
+
+The model abstracts a successful durable write and activation as one atomic action. It
+does not model parsing, suffix contents, or persistence failure. Implementation tests
+check those boundaries, including direct plain-text task retention, unrestricted metadata
+replacement, appended suffixes, final settlement/reopen, and failed persistence. Hosts
+must supply a quiescent terminal tool event; the harness `KernelCompletion` model and
+real-process failure tests check its Python control-channel boundary.
+
+`FinalBoundary.tla` isolates the final-only source-space and canonical-completion gates
+before either candidate is consumed. Ordinary context can still accept an atomic candidate
+while a tool runs. The finite instance passed **76 generated / 40 distinct states**; removing
+either final gate fails its corresponding invariant. It abstracts a stable preceding context
+transform and candidate acquisition as one action. Maintained lifecycle tests check both
+atomic and direct candidates across real source-prefix comparisons and deferred acquisition.
 
 ## Automatic compaction policy
 

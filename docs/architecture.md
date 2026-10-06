@@ -12,7 +12,7 @@ Three representations stay distinct:
 - **Raw context:** the messages supplied by Pi's `context` event.
 - **Effective context:** the accepted edited prefix plus untouched raw suffix, with
   optional observation caps and overflow withholding.
-- **Mirror:** an immutable, metadata-bound snapshot of effective conversation text.
+- **Mirror:** an editable view of an immutable, metadata-bound snapshot of effective conversation text.
   System prompts, notices, and active continuity annotations are outside this file.
 
 The model owns retention strategy. The validator owns source identity, in-flight consistency,
@@ -26,29 +26,54 @@ of provider admissibility or semantic faithfulness.
 2. `before_agent_start` adds protocol guidance and optional steering through
    `systemPromptOptions.sections`. A supplied `forceSystemPrompt` also receives the
    addition; unrelated prompt options remain intact.
-3. Each `context` callback serializes with earlier context callbacks. It first claims
-   `LIVE_CONTEXT.commit.md` by atomic rename, then reads only that completed candidate.
-4. Acceptance requires an exact first metadata line, a retained snapshot nonce, its
-   baseline digest, the current accepted revision, unchanged source prefix, and matching
-   provider/model/API identity. The candidate is parsed against the immutable snapshot.
-5. The checkpoint is persisted before becoming active. A successful edit clears all
-   competing snapshots. Invalid or stale submissions leave the accepted projection alone.
+3. `context` and final `agent_end` callbacks use one serialized acceptance path. Final
+   events first require all writers to finish, canonical results to be present, and their
+   source prefix to match the published baseline. Otherwise they leave both candidates
+   untouched for ordinary context (which may include preceding extension transforms).
+   Eligible callbacks claim atomic submissions first. A direct edit is eligible only after every
+   tracked tool has finished and its owning top-level result is in the source projection.
+   `tool_result` callbacks update bookkeeping only: they precede canonical result commit.
+4. Acceptance requires a retained snapshot, the current accepted revision, unchanged raw
+   source prefix, and matching provider/model/API identity. Metadata edits must retain
+   the exact first line and digest. Headerless direct edits use the published snapshot's
+   provenance and are normalized into task-plus-notes blocks before the same validator.
+5. The checkpoint is persisted before becoming active. A successful edit clears competing
+   snapshots. Invalid candidates and persistence failures leave the accepted projection alone.
 6. Projection rebasing appends every raw message after the captured prefix unchanged.
-   Budget/cap/guard logic runs conservatively, then a new mirror is atomically published.
-7. Notices report outcomes on the next request. `turn_end` records usage only; it never
-   accepts edits or assumes that every asynchronous tool has completed.
+   Budget/cap/guard logic runs as configured. Refresh is deferred while a tool is active
+   or its canonical completion is absent; inference itself does not wait for tools.
+7. Notices report outcomes on the next request. `turn_end` records usage only. Final
+   `agent_end` consumes eligible edits without requiring another model request; an early
+   end event does not wait for outstanding work. Accepted checkpoints survive reload.
 
-The last 16 request snapshots are retained per accepted revision. Snapshot objects share
-unchanged immutable message clones to avoid repeatedly copying large identical output.
-A new context read does not advance the accepted revision: a pending file edit can finish
-after another request and still be accepted with the newer raw suffix intact. Eviction is
-reported as an expired/conflicting snapshot, not silently rebased onto a different source.
+Every public `tool_call` is tracked by identity, including nested calls; there is no
+Python-name or write-intent heuristic. Admission marks activity before awaiting existing
+context I/O. The actual tool cannot start until that I/O finishes. Direct reads recheck
+invocation generation, active writers, lifecycle, and store after I/O. Refresh stages a
+private file and rechecks its publication guard before rename. An admission during the
+rename waits for the complete context operation and therefore sees its published baseline.
+Branch navigation and compaction replace the private store; lifecycle/model changes
+invalidate snapshot provenance. A failed invocation rejects a changed direct candidate.
 
-Writers copy the mirror to a sibling draft, keep metadata unchanged, close the completed
-file, and atomically rename it to the submission path. They must not modify a published
-submission or publish concurrent drafts into the single slot. The reader rejects symlinks,
-non-regular files, and candidates over 16 MiB. Temporary mirrors and pending drafts do not
-survive reload; persisted checkpoints do.
+The host's terminal tool event must follow actual execution completion, including errors,
+cancellation, and timeout. In persistent-harness, Python `done` follows cell execution;
+namespace saving may continue afterward. A broken control channel terminates the controlled
+process and waits for exit before resolving the failed execution. These gates do not claim
+ownership of detached processes or threads that continue after their tool returns.
+
+Detached writers retain the explicit publication path: copy a snapshot to a private
+sibling draft, keep its metadata unchanged, finish and close it, then atomically rename
+it to `LIVE_CONTEXT.commit.md`. Do not mutate the published candidate or publish competing
+drafts into this single slot. Ordinary context can consume it while unrelated tools remain
+active; final settlement still requires the all-writer and source-space gates.
+Both paths reject non-regular files and candidates over 16 MiB; metadata-free atomic
+submissions are rejected because they have no source-bound completion owner.
+
+The last 16 published snapshots are retained per accepted revision. Snapshot objects share
+unchanged immutable message clones. New requests and appended raw messages do not by
+themselves invalidate a draft. Revision, source-prefix, model, branch, reset, disable,
+reload, and expiry conflicts reject it rather than rebind it to newer context. Temporary
+mirrors and unfinished drafts do not survive reload; accepted checkpoints do.
 
 ## Document validation and native spans
 
@@ -78,10 +103,10 @@ otherwise contain an orphan. Unrelated edits that retain the call remain availab
 There is no deferred submission queue, archive rewrite, or tool execution/replay path.
 A fully represented completed exchange can be deleted or replaced by a summary.
 
-In CLM mode, a headerless summary requires the exact metadata line and replaces every
-original block with one authored notes block. Metadata alone replaces the snapshot with
-an empty message list, like an explicit empty-block edit. No original user message is
-retained automatically. The same in-flight call rule applies to both forms. Conservative
+In CLM mode, headerless direct text retains the first user task followed by one notes
+block, matching upstream. A summary after the exact metadata line replaces every original
+block without restoring the task. Metadata alone replaces the snapshot with an empty
+message list. The same in-flight call rule applies to all forms. Conservative
 mode retains its first/latest-user protection and shrink requirement, including when
 all block headers are removed.
 

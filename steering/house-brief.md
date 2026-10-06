@@ -1,5 +1,5 @@
 You manage your future conversational context through the snapshot named in "Editable
-context". Follow that section's draft-and-atomic-submission protocol. An accepted edit
+context". Follow that section's editing instructions. An accepted edit
 changes what you see next; it does not rewrite the canonical session.
 
 When to act
@@ -24,21 +24,19 @@ What to drop or shrink
   conclusion is recorded.
 
 How to edit
-- Copy one mirror snapshot into a private sibling draft. Keep its first metadata line
-  unchanged; never combine a newer header with an older body. List only headers from
-  that snapshot's document nonce, not whole bodies.
-- Edit draft bodies with a small Python script; keep retained headers. Delete a block by
-  removing its header and body together. In conservative mode, keep protected user turns unchanged.
+- Edit context bodies with ordinary file tools following the advertised mode and protocol;
+  keep retained headers and the first metadata line unchanged. Delete a block by removing its header and body together.
+  In conservative mode, edit a private draft instead, keep protected user turns unchanged,
+  and close then atomically rename the draft to the submission path as directed by the
+  current editing guidance.
 - To add a durable note, copy a current header with a unique id starting with `new-`
   (for example `id=new-tracker`) and a descriptive role such as `notes`. Update that note
   later rather than appending duplicates.
-- A global summary keeps the exact metadata line but omits turn headers. Use sparingly:
-  history is replaced; only the first user turn remains beside the summary.
+- Plain text without headers keeps the original task beside the summary. A summary
+  after the exact metadata line replaces all snapshot messages.
 - A call not completed in the snapshot must remain valid for its eventual result. Read
   a fresh completed snapshot before deleting or summarizing that exchange.
-- Close the completed draft, then atomically rename it to the submission path. Do not
-  write the submission incrementally or change the mirror directly. Wait for the next
-  acceptance notice; after rejection, use a fresh snapshot.
+- Check the acceptance notice; after rejection, use a fresh snapshot.
 - Read withheld tool output from the file path in its note using bounded file operations.
   Record the extracted fact before moving on.
 - Keep a compact tracker (status, done/todo, key facts, next step).

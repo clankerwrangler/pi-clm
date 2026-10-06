@@ -62,13 +62,18 @@ export class MirrorStore {
 		return new MirrorStore(directory);
 	}
 
-	async write(content: string): Promise<void> {
+	async write(content: string, canPublish: () => boolean = () => true): Promise<boolean> {
 		if (this.disposed) throw new Error("Mirror store has been disposed.");
 		const temporaryPath = join(this.directory, `.${basename(this.filePath)}.${randomUUID()}.tmp`);
 		try {
 			await writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+			if (!canPublish()) {
+				await rm(temporaryPath, { force: true });
+				return false;
+			}
 			await rename(temporaryPath, this.filePath);
 			await chmod(this.filePath, 0o600);
+			return true;
 		} catch (error) {
 			await rm(temporaryPath, { force: true }).catch(() => undefined);
 			throw error;
@@ -78,6 +83,8 @@ export class MirrorStore {
 	async read(): Promise<string | undefined> {
 		if (this.disposed) return undefined;
 		try {
+			const info = await lstat(this.filePath);
+			if (!info.isFile() || info.size > 16 * 1024 * 1024) throw new Error("Mirror must be a regular file of at most 16 MiB.");
 			return await readFile(this.filePath, "utf8");
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;

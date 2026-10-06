@@ -1808,7 +1808,11 @@ describe("async file submissions and independent safety", () => {
 				else if (conflict === "expiry") for (let i = 0; i < 16; i++) await nextRequest(harness);
 				else if (conflict === "branch") await emit(harness, "session_tree", {});
 				else await harness.commands.get("clm").handler("off", harness.ctx);
-				await submit(path, draft);
+				const currentPath = conflict === "branch"
+					? String((await emit(harness, "before_agent_start", { systemPrompt: "base" }))[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1]
+					: path;
+				if (conflict === "branch") await assert.rejects(readFile(path, "utf8"), /ENOENT/);
+				await submit(currentPath, draft);
 				const count = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length;
 				const next = await emit(harness, "context", { messages: raw });
 				assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, count);
@@ -1859,7 +1863,7 @@ describe("async file submissions and independent safety", () => {
 			const result = await harness.handlers.get("before_agent_start")![0](event, harness.ctx);
 			assert.equal(result, undefined);
 			assert.equal(event.systemPromptOptions.sections.prior, "existing");
-			assert.match((event.systemPromptOptions.sections as any).editable_context, /atomically rename/);
+			assert.match((event.systemPromptOptions.sections as any).editable_context, /ordinary bash\/edit\/write tools/);
 			assert.match(event.systemPromptOptions.forceSystemPrompt, /^forced/);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
@@ -2024,4 +2028,192 @@ test("early permission reads config, enablement and restored branch state freshl
     }
     assert.equal(malformedVetoes, 0);
   } finally { await emit(harness, "session_shutdown", {}); }
+});
+
+
+describe("completed direct mirror edits", () => {
+	function deferred() {
+		let resolve!: () => void;
+		const promise = new Promise<void>((done) => { resolve = done; });
+		return { promise, resolve };
+	}
+	async function start(t: any) {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", {});
+		t.after(() => emit(harness, "session_shutdown", {}));
+		const prompt = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+		const path = prompt[0].systemPrompt.match(/mirrored at `([^`]+)`/)![1];
+		const raw = rawConversation();
+		await emit(harness, "context", { messages: raw });
+		return { harness, path, raw };
+	}
+	const call = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "ipython", arguments: { code: "edit" } }], timestamp: 10 });
+	const result = (id: string, isError = false) => ({ role: "toolResult", toolCallId: id, toolName: "ipython", content: [{ type: "text", text: "done" }], isError, timestamp: 11 });
+	const revision = (h: Harness) => h.branch.filter((e) => e.customType === LIVE_CONTEXT_STATE && e.data.checkpoint).at(-1)?.data.revision ?? 0;
+	async function begin(h: Harness, id: string, parentToolCallId?: string) {
+		return emit(h, "tool_call", { toolCallId: id, parentToolCallId, toolName: "ipython", input: {} });
+	}
+	async function finish(h: Harness, id: string, isError = false, parentToolCallId?: string) {
+		return emit(h, "tool_result", { ...result(id, isError), parentToolCallId });
+	}
+
+	for (const mode of ["plain", "metadata", "empty", "blocks"]) test(`${mode}: paused writer, canonical completion, suffix and final reopen`, async (t) => {
+		const { harness: h, path, raw } = await start(t);
+		const mirror = await readFile(path, "utf8");
+		const metadata = mirror.split("\n")[0];
+		await begin(h, "writer");
+		await writeFile(path, metadata); // Valid but incomplete: must not become an empty replacement.
+		const pending = [...raw, call("writer")];
+		const during = await emit(h, "context", { messages: pending });
+		assert.equal(revision(h), 0);
+		assert.equal(await readFile(path, "utf8"), metadata);
+		assert.match(JSON.stringify(during[0].messages), /large output/);
+		await emit(h, "agent_end", { messages: pending });
+		assert.equal(revision(h), 0, "early final boundary cannot release a writer");
+		const text = mode === "plain" ? "Summary preserves decisions." : mode === "metadata" ? `${metadata}\nSummary preserves decisions.` : mode === "empty" ? metadata : compactSecondTurn(mirror);
+		await writeFile(path, text);
+		await finish(h, "writer");
+		await emit(h, "context", { messages: pending });
+		assert.equal(revision(h), 0, "tool_result callback precedes its canonical record");
+		assert.equal(await readFile(path, "utf8"), text);
+		const suffix = { role: "user", content: "Unseen appended instruction", timestamp: 12 };
+		const completed = [...pending, result("writer"), suffix];
+		// The final source projection includes already-committed results, without
+		// requiring another provider/context request.
+		for (const message of completed) if (!h.branch.some((e) => e.message === message)) h.branch.push({ type: "message", id: `final-${h.branch.length}`, message });
+		await emit(h, "agent_end", { messages: completed });
+		assert.equal(revision(h), 1);
+		await emit(h, "agent_end", { messages: completed });
+		assert.equal(revision(h), 1, "repeated settlement is idempotent");
+		const resumed = createHarness(h.branch);
+		liveContextExtension(resumed.pi, { editingMode: "clm" });
+		await emit(resumed, "session_start", {});
+		t.after(() => emit(resumed, "session_shutdown", {}));
+		const visible = (await emit(resumed, "context", { messages: completed }))[0].messages;
+		assert.doesNotMatch(JSON.stringify(visible), /large output/);
+		assert.deepEqual(visible.slice(-3), [call("writer"), result("writer"), suffix]);
+		if (mode === "plain" || mode === "blocks") assert.deepEqual(visible[0], raw[0]);
+		else assert.notDeepEqual(visible[0], raw[0]);
+		if (mode === "empty") assert.equal(visible.length, 3);
+	});
+
+	test("nested completion, errors and subsequent valid edits keep the mirror live", async (t) => {
+		const { harness: h, path, raw } = await start(t);
+		await begin(h, "parent");
+		await begin(h, "parent/1", "parent");
+		await writeFile(path, "partial summary");
+		await finish(h, "parent/1", true, "parent");
+		await emit(h, "context", { messages: [...raw, call("parent")] });
+		assert.equal(await readFile(path, "utf8"), "partial summary");
+		await finish(h, "parent");
+		const complete = [...raw, call("parent"), result("parent")];
+		await emit(h, "context", { messages: complete });
+		assert.equal(revision(h), 0);
+		assert.match(await readFile(path, "utf8"), /^\[\[LIVE_CONTEXT/);
+		await begin(h, "retry");
+		await writeFile(path, "Complete retry summary");
+		await finish(h, "retry");
+		await emit(h, "context", { messages: [...complete, call("retry"), result("retry")] });
+		assert.equal(revision(h), 1);
+	});
+
+	test("a new invocation during direct read invalidates that read and waits for context I/O", async (t) => {
+		const { harness: h, path, raw } = await start(t);
+		await begin(h, "first");
+		await writeFile(path, "First complete summary");
+		await finish(h, "first");
+		const entered = deferred();
+		const release = deferred();
+		const original = MirrorStore.prototype.read;
+		t.mock.method(MirrorStore.prototype, "read", async function(this: MirrorStore) {
+			const text = await original.call(this); entered.resolve(); await release.promise; return text;
+		});
+		const preparing = emit(h, "context", { messages: [...raw, call("first"), result("first")] });
+		await entered.promise;
+		let admitted = false;
+		const admission = begin(h, "second").then(() => { admitted = true; });
+		await Promise.resolve();
+		assert.equal(admitted, false);
+		release.resolve(); await preparing; await admission;
+		assert.equal(revision(h), 0);
+		assert.equal(await readFile(path, "utf8"), "First complete summary");
+		await finish(h, "second");
+	});
+
+	test("a tool admitted during refresh staging cannot execute or lose its input mirror", async (t) => {
+		const { harness: h, path, raw } = await start(t);
+		const originalText = await readFile(path, "utf8");
+		const entered = deferred(); const release = deferred();
+		const original = MirrorStore.prototype.write;
+		t.mock.method(MirrorStore.prototype, "write", async function(this: MirrorStore, text: string, guard: () => boolean) {
+			entered.resolve(); await release.promise; return original.call(this, text, guard);
+		});
+		const preparing = emit(h, "context", { messages: [...raw, { role: "user", content: "tail" }] });
+		await entered.promise;
+		let admitted = false;
+		const admission = begin(h, "next").then(() => { admitted = true; });
+		await Promise.resolve(); assert.equal(admitted, false);
+		release.resolve(); await preparing; await admission;
+		assert.equal(await readFile(path, "utf8"), originalText);
+		await finish(h, "next");
+	});
+
+	test("atomic submissions remain independent of active direct writers", async (t) => {
+		const { harness: h, path, raw } = await start(t);
+		const mirror = await readFile(path, "utf8");
+		await begin(h, "active");
+		await writeFile(path, "partial direct candidate");
+		await submit(path, compactSecondTurn(mirror));
+		await emit(h, "context", { messages: [...raw, call("active")] });
+		assert.equal(revision(h), 1);
+		assert.equal(await readFile(path, "utf8"), "partial direct candidate");
+		await finish(h, "active");
+	});
+
+	for (const kind of ["atomic", "direct"] as const) for (const finalFirst of [false, true]) {
+		test(`${kind}: preceding context transform survives ${finalFirst ? "canonical final boundary" : "ordinary context"}`, async (t) => {
+			const { harness: h, path, raw } = await start(t);
+			const transformed = [{ ...raw[0], content: "Stable preceding context transform" }, raw[1]];
+			await emit(h, "context", { messages: transformed, persistSources: false });
+			const candidate = compactSecondTurn(await readFile(path, "utf8"));
+			await begin(h, "writer");
+			if (kind === "atomic") await submit(path, candidate);
+			else await writeFile(path, candidate);
+			await finish(h, "writer");
+			if (finalFirst) {
+				await emit(h, "agent_end", { messages: [...raw, call("writer"), result("writer")] });
+				assert.equal(revision(h), 0, "defer before consuming a candidate in another source space");
+				assert.equal(await readFile(kind === "atomic" ? path.replace(/\.md$/, ".commit.md") : path, "utf8"), candidate);
+			}
+			await emit(h, "context", { messages: [...transformed, call("writer"), result("writer")], persistSources: false });
+			assert.equal(revision(h), 1, "the next matching context must still accept the candidate");
+		});
+	}
+
+	for (const phase of ["active", "result not canonical"] as const) {
+		test(`final atomic acceptance defers while ${phase}; ordinary context remains independent`, async (t) => {
+			const { harness: h, path, raw } = await start(t);
+			await begin(h, "writer");
+			const candidate = compactSecondTurn(await readFile(path, "utf8"));
+			await submit(path, candidate);
+			if (phase === "result not canonical") await finish(h, "writer");
+			const pending = [...raw, call("writer")];
+			await emit(h, "agent_end", { messages: pending });
+			assert.equal(revision(h), 0);
+			assert.equal(await readFile(path.replace(/\.md$/, ".commit.md"), "utf8"), candidate);
+			await emit(h, "context", { messages: pending });
+			assert.equal(revision(h), 1);
+			if (phase === "active") await finish(h, "writer");
+		});
+	}
+
+	test("final-boundary persistence failure does not activate the direct projection", async (t) => {
+		const { harness: h, path, raw } = await start(t);
+		await begin(h, "writer"); await writeFile(path, "summary"); await finish(h, "writer");
+		t.mock.method(h.pi, "appendEntry", () => { throw new Error("disk full"); });
+		await emit(h, "agent_end", { messages: [...raw, call("writer"), result("writer")] });
+		assert.equal(revision(h), 0);
+		assert(h.notifications.some((text) => /persistence failed/.test(text)));
+	});
 });

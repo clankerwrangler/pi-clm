@@ -36,6 +36,8 @@ export interface TurnBaseline {
 }
 
 export interface ApplyDocumentOptions {
+	/** Source-bound direct mirror edits may use the upstream task-plus-notes shorthand. */
+	allowPlainText?: boolean;
 	/** CLM permits reordered blocks and new IDs prefixed with new-. */
 	editingMode?: "conservative" | "clm";
 	requireShrink?: boolean;

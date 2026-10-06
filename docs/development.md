@@ -9,6 +9,7 @@ corepack pnpm check   # strict TypeScript check and all tests
 ```
 
 The tests cover projection validation, broad mixed-history editing and in-flight call admission, late file submissions,
+direct-tool completion and I/O races, final settlement/reopen and source-space deferral,
 conflicts and snapshot expiry, disabled-mode compaction, artifact lifetime and failures,
 public prompt options, helper exposure, settings, and the viewer. Tests do not require
 provider credentials. Local mock lifecycle tests are not evidence of a live provider run.

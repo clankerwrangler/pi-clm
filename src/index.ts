@@ -246,6 +246,29 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		return value;
 	});
 	let contextPending: Promise<unknown> = Promise.resolve();
+	const activeInvocations = new Map<string, string>();
+	const completedInvocations = new Map<string, boolean>();
+	let invocationGeneration = 0;
+	let lastDirectText: string | undefined;
+	let publishedBaseline: (TurnBaseline & { model: string }) | undefined;
+
+	function canonicalCompletions(rawMessages: LiveContextMessage[]): boolean {
+		const results = new Set(rawMessages.filter((message) => message.role === "toolResult")
+			.map((message) => message.toolCallId));
+		return [...completedInvocations.keys()].every((id) => results.has(id));
+	}
+
+	function mirrorAvailable(rawMessages: LiveContextMessage[]): boolean {
+		return activeInvocations.size === 0 && canonicalCompletions(rawMessages);
+	}
+
+	function invalidateMirror(): void {
+		publishedBaseline = undefined;
+		lastDirectText = undefined;
+		invocationGeneration++;
+		completedInvocations.clear();
+	}
+
 	const modelIdentity = (ctx: ExtensionContext) => JSON.stringify([ctx.model?.provider, ctx.model?.id, ctx.model?.api]);
 	let lifecycleEpoch = 0;
 	/** A /clm-compact waiting for the agent to go idle; a second one is refused instead of racing it. */
@@ -606,6 +629,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			persistOutcome({ ...state, enabled: false, event: { kind: "disabled", at: new Date().toISOString() } });
 			lifecycleEpoch++;
 			drafts.clear();
+			invalidateMirror();
 			turnBaseline = undefined;
 			currentContextView = undefined;
 		}
@@ -654,6 +678,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	}
 
 	async function replaceStore(ctx: ExtensionContext): Promise<void> {
+		activeInvocations.clear();
+		invalidateMirror();
 		await store?.cleanup().catch(() => undefined);
 		store = undefined;
 		try {
@@ -668,6 +694,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	function restore(ctx: ExtensionContext): void {
 		lifecycleEpoch++;
 		drafts.clear();
+		invalidateMirror();
 		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
 		state = reconstructLiveContextState(branch);
 		checkpointHistory = reconstructLiveContextHistory(branch)
@@ -1245,6 +1272,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				persistOutcome({ ...state, enabled: false, event: { kind: "disabled", at: new Date().toISOString() } });
 				lifecycleEpoch++;
 				drafts.clear();
+				invalidateMirror();
 				turnBaseline = undefined;
 				currentContextView = undefined;
 				updateStatus(ctx);
@@ -1254,6 +1282,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				persist(resetProjectionState(state, "Projection reset by user."));
 				lifecycleEpoch++;
 				drafts.clear();
+				invalidateMirror();
 				turnBaseline = undefined;
 				currentContextView = undefined;
 				lastBudgetReading = undefined;
@@ -1294,11 +1323,29 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 	});
 
-	pi.on("context", (event, ctx) => {
+	function serializeContext<T>(operation: () => Promise<T>): Promise<T | undefined> {
 		const epoch = lifecycleEpoch;
-		const run = contextPending.then(() => epoch === lifecycleEpoch ? prepareContext(event, ctx) : undefined);
+		const run = contextPending.then(() => epoch === lifecycleEpoch ? operation() : undefined);
 		contextPending = run.catch(() => undefined);
 		return run;
+	}
+
+	pi.on("context", (event, ctx) => serializeContext(() => prepareContext(event, ctx)));
+	pi.on("agent_end", (event, ctx) => serializeContext(async () => {
+		const rawMessages = asLiveMessages(event.messages);
+		// Final events use canonical messages, not preceding context transforms.
+		// Defer before claiming either candidate when that source space cannot
+		// certify the published baseline, or a writer/result is still pending.
+		if (!publishedBaseline || !mirrorAvailable(rawMessages) ||
+			digestMessages(rawMessages.slice(0, publishedBaseline.rawMessages.length)) !==
+				digestMessages(publishedBaseline.rawMessages)) return;
+		await acceptSubmission(rawMessages, ctx);
+	}));
+	pi.on("model_select", () => {
+		lifecycleEpoch++;
+		drafts.clear();
+		invalidateMirror();
+		turnBaseline = undefined;
 	});
 
 	async function prepareContext(event: ContextEvent, ctx: ExtensionContext) {
@@ -1436,15 +1483,23 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const rawSnapshot = snapshotMessages(rawMessages);
 		const snapshotModel = modelIdentity(ctx);
 		try {
-			await store.write(snapshot.text);
-			if (epoch !== lifecycleEpoch || !state.enabled) return;
-			turnBaseline = {
-				rawMessages: rawSnapshot,
-				effectiveMessages: snapshot.messages,
-				snapshot,
-			};
-			drafts.set(snapshot.documentId, { ...turnBaseline, model: snapshotModel });
-			while (drafts.size > 16) drafts.delete(drafts.keys().next().value!);
+			const activeStore = store;
+			const generation = invocationGeneration;
+			const canPublish = () => epoch === lifecycleEpoch && activeStore === store && state.enabled &&
+				generation === invocationGeneration && mirrorAvailable(rawMessages);
+			if (canPublish() && await activeStore.write(snapshot.text, canPublish)) {
+				if (epoch !== lifecycleEpoch || activeStore !== store || !state.enabled) return;
+				turnBaseline = {
+					rawMessages: rawSnapshot,
+					effectiveMessages: snapshot.messages,
+					snapshot,
+				};
+				publishedBaseline = { ...turnBaseline, model: snapshotModel };
+				lastDirectText = snapshot.text;
+				completedInvocations.clear();
+				drafts.set(snapshot.documentId, publishedBaseline);
+				while (drafts.size > 16) drafts.delete(drafts.keys().next().value!);
+			}
 		} catch (error) {
 			turnBaseline = undefined;
 			const message = error instanceof Error ? error.message : String(error);
@@ -1526,7 +1581,13 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		toolCallsThisTurn = 0;
 	});
 
-	pi.on("tool_call", (event, ctx) => {
+	pi.on("tool_call", async (event, ctx) => {
+		// Register before yielding. Only admission waits for existing file I/O;
+		// context preparation never waits for a running invocation.
+		const owner = event.parentToolCallId ? activeInvocations.get(event.parentToolCallId) ?? event.parentToolCallId : event.toolCallId;
+		activeInvocations.set(event.toolCallId, owner);
+		invocationGeneration++;
+		await contextPending;
 		if (oneToolPerTurn && state.enabled) {
 			toolCallsThisTurn += 1;
 			if (toolCallsThisTurn > 1) {
@@ -1582,6 +1643,11 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	});
 
 	pi.on("tool_result", (event, ctx) => {
+		const owner = activeInvocations.get(event.toolCallId);
+		if (owner) {
+			activeInvocations.delete(event.toolCallId);
+			if (publishedBaseline) completedInvocations.set(owner, Boolean(event.isError) || Boolean(completedInvocations.get(owner)));
+		}
 		if (!sizeTrailer || !state.enabled) return undefined;
 		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow);
 		if (!resolved) return undefined;
@@ -1610,8 +1676,29 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const activeStore = store;
 		const epoch = lifecycleEpoch;
 		let editedText: string | undefined;
+		let direct = false;
+		let baseline: (TurnBaseline & { model: string }) | undefined;
 		try {
 			editedText = await activeStore.readSubmission();
+			if (epoch !== lifecycleEpoch || activeStore !== store || !state.enabled) return;
+			if (editedText === undefined && editingMode === "clm" && publishedBaseline &&
+				completedInvocations.size > 0 && mirrorAvailable(rawMessages)) {
+				const generation = invocationGeneration;
+				editedText = await activeStore.read();
+				if (epoch !== lifecycleEpoch || activeStore !== store || !state.enabled ||
+					generation !== invocationGeneration || !mirrorAvailable(rawMessages)) return;
+				const failed = [...completedInvocations.values()].some(Boolean) || rawMessages.some((message) =>
+					message.role === "toolResult" && completedInvocations.has(String(message.toolCallId)) && message.isError);
+				completedInvocations.clear();
+				if (editedText === undefined || editedText === lastDirectText) return;
+				lastDirectText = editedText;
+				if (failed) {
+					queueOutcomeNotice("Edit rejected: the writing invocation did not complete successfully. Read the current mirror and retry the edit.");
+					return;
+				}
+				direct = true;
+				baseline = publishedBaseline;
+			}
 		} catch (error) {
 			queueOutcomeNotice(`Submission read failed: ${error instanceof Error ? error.message : String(error)}`);
 			return;
@@ -1619,7 +1706,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		if (editedText === undefined) return;
 		if (epoch !== lifecycleEpoch || activeStore !== store || !state.enabled) return;
 		const id = /^\[\[LIVE_CONTEXT version=1 revision=\d+ document=([a-f0-9]{64}) /.exec(editedText)?.[1];
-		const baseline = id ? drafts.get(id) : undefined;
+		baseline = id ? drafts.get(id) : baseline;
 		if (!baseline || baseline.snapshot.revision !== state.revision || baseline.model !== modelIdentity(ctx) ||
 			digestMessages(rawMessages.slice(0, baseline.rawMessages.length)) !== digestMessages(baseline.rawMessages)) {
 			queueOutcomeNotice("Edit rejected: expired or conflicting snapshot. Read the current mirror and submit a new draft.");
@@ -1632,6 +1719,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		// that do not provide one.
 		const result = applyContextDocument(editedText, baseline.snapshot, {
 			editingMode,
+			allowPlainText: direct,
 			estimate: estimateLiveContextTokens,
 			estimateUnit: "tokens",
 		});
@@ -1735,6 +1823,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	pi.on("session_tree", async (_event, ctx) => {
 		restore(ctx);
+		await replaceStore(ctx);
 		queueOutcomeNotice(`Restored live-context state for the selected branch (revision ${state.revision}).`);
 	});
 
@@ -1742,10 +1831,12 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		persist(resetProjectionState(state, "Projection reset after native Pi compaction."));
 		lifecycleEpoch++;
 		drafts.clear();
+		invalidateMirror();
 		turnBaseline = undefined;
 		currentContextView = undefined;
 		lastBudgetReading = undefined;
 		projectionReplaced = true;
+		await replaceStore(ctx);
 		queueOutcomeNotice("Native Pi compaction became the new raw context baseline.");
 		updateStatus(ctx);
 	});
@@ -1753,6 +1844,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	pi.on("session_shutdown", async (_event, ctx) => {
 		lifecycleEpoch++;
 		drafts.clear();
+		invalidateMirror();
 		turnBaseline = undefined;
 		currentContextView = undefined;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
