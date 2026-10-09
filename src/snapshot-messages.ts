@@ -1,11 +1,26 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { digestMessages } from "./context-document.ts";
-import type { LiveContextMessage } from "./types.ts";
+import { digestMessages, escapeStructuralLines, renderContextDocument, renderMessage, type RenderContextDocumentOptions } from "./context-document.ts";
+import type { ContextDocumentSnapshot, LiveContextMessage } from "./types.ts";
 
 /** Share detached messages by content, not the SDK's request-local object identity. */
 export class SnapshotMessages {
 	private readonly buckets = new Map<string, LiveContextMessage[]>();
+	private readonly renderedBodies = new WeakMap<LiveContextMessage, { plain?: string; escaped?: string }>();
+
+	/** Render only captured values: mutable request objects must never key this cache. */
+	render(messages: LiveContextMessage[], options: RenderContextDocumentOptions = {}): ContextDocumentSnapshot {
+		return renderContextDocument(this.capture(messages), options, (source, escaped) => {
+			const bodies = this.renderedBodies.get(source) ?? {};
+			const key = escaped ? "escaped" : "plain";
+			if (bodies[key] === undefined) {
+				const body = renderMessage(source);
+				bodies[key] = escaped ? escapeStructuralLines(body) : body;
+				this.renderedBodies.set(source, bodies);
+			}
+			return bodies[key];
+		});
+	}
 
 	capture(messages: LiveContextMessage[]): LiveContextMessage[] {
 		return messages.map((message) => {

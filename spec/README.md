@@ -7,7 +7,7 @@ implementation and integration tests cover those boundaries separately.
 From `spec/`, set `TLA_TOOLS_JAR` to the local TLA+ tools jar:
 
 ```sh
-for model in ProjectionEditing ContextSafety MirrorLifecycle SnapshotOwnership FinalBoundary ToolExposure Maintenance AutomaticCompactionPolicy; do
+for model in ProjectionEditing ContextSafety MirrorLifecycle SnapshotOwnership RenderOwnership FinalBoundary ToolExposure Maintenance AutomaticCompactionPolicy; do
   java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
     -config "$model.cfg" "$model.tla"
 done
@@ -116,3 +116,14 @@ tests check those boundaries separately.
 `ToolExposure.tla` models default direct declarations, explicit code-mode callability,
 and invalid configuration refusing to load: **16 generated / 7 distinct states**, no
 violations. A stock-SDK test checks the actual public registry contract.
+
+## Rendered snapshot ownership
+
+`RenderOwnership.tla` separates immutable rendered bodies, per-draft framing, and
+materialized full text. Every retained draft reconstructs its original framing
+and content, while equal bodies share storage and no draft owns a flattened full
+document. The bounded instance (three drafts, five requests) passed **7,712
+generated / 2,477 distinct states**. Disabling sharing, lazy text, owner release,
+or original framing fails the corresponding invariant. This is symbolic ownership,
+not a JavaScript rope/GC proof; SDK-boundary heap probes and reconstruction tests
+cover the implementation. The existing 16-draft window and edit rules are unchanged.

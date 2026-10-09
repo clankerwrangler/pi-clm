@@ -2219,12 +2219,13 @@ describe("completed direct mirror edits", () => {
 });
 
 
-test("stock context dispatch shares pruned raw payloads while all 16 drafts remain usable", async (t) => {
-	const raw = [{ role: "user" as const, content: "synthetic payload ".repeat(256), timestamp: 1, snapshotProbe: true }];
+for (const pruned of [true, false]) test(`stock context dispatch shares ${pruned ? "pruned raw" : "visible multipart"} payloads while all 16 drafts remain usable`, async (t) => {
+	const raw = [{ role: "user" as const, content: [{ type: "text" as const, text: "synthetic payload ".repeat(256) },
+		{ type: "text" as const, text: "second part\n[[CTX_TURN quoted structural line" }], timestamp: 1, snapshotProbe: true }];
 	const checkpoint = createProjectionCheckpoint({ revision: 1, sourceMessages: raw,
 		projectedMessages: [{ role: "user", content: "Retained summary", timestamp: 1 }], beforeEstimate: 1000, afterEstimate: 10 });
-	const harness = createHarness([{ type: "custom", customType: LIVE_CONTEXT_STATE,
-		data: { version: 1, enabled: true, revision: 1, checkpoint } }]);
+	const harness = createHarness(pruned ? [{ type: "custom", customType: LIVE_CONTEXT_STATE,
+		data: { version: 1, enabled: true, revision: 1, checkpoint } }] : []);
 	liveContextExtension(harness.pi, { editingMode: "clm" });
 	await emit(harness, "session_start", {});
 	const prompt = await emit(harness, "before_agent_start", { systemPrompt: "base" });
@@ -2242,13 +2243,13 @@ test("stock context dispatch shares pruned raw payloads while all 16 drafts rema
 		const oldest = await readFile(path, "utf8");
 		for (let request = 1; request < 16; request++) {
 			const output = await ExtensionRunner.prototype.emitContext.call(runner, raw);
-			assert.equal((output[0] as LiveContextMessage).content, "Retained summary");
+			assert.deepEqual((output[0] as LiveContextMessage).content, pruned ? "Retained summary" : raw[0].content);
 		}
 		assert.equal(payloadCopies, 1, "unchanged raw content must not be copied for each fresh SDK request");
 		await submit(path, `${oldest.split("\n")[0]}\nA new summary from the oldest valid draft.`);
 		await ExtensionRunner.prototype.emitContext.call(runner, raw);
-		assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1).data.revision, 2);
-		assert.equal(raw[0].content, "synthetic payload ".repeat(256));
+		assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1).data.revision, pruned ? 2 : 1);
+		assert.equal(raw[0].content[0].text, "synthetic payload ".repeat(256));
 	} finally {
 		await emit(harness, "session_shutdown", {});
 	}

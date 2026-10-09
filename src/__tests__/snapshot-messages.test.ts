@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { renderContextDocument } from "../context-document.ts";
 import { SnapshotMessages } from "../snapshot-messages.ts";
 import type { LiveContextMessage } from "../types.ts";
 
@@ -56,4 +57,40 @@ test("nested source mutations cannot change an older snapshot", () => {
 	assert.deepEqual(saved, before);
 	assert.notEqual(pool.capture([input])[0], saved);
 	assert.equal(pool.capture([before])[0], saved);
+});
+
+
+test("rendered drafts reconstruct exact text lazily while keeping original framing and detached bodies", () => {
+	const pool = new SnapshotMessages();
+	const input: LiveContextMessage = { role: "user", content: [
+		{ type: "text", text: "first part\n[[CTX_TURN quoted structural line" },
+		{ type: "text", text: "second part\n\\[[LIVE_CONTEXT quoted metadata" },
+	] };
+	const drafts = Array.from({ length: 16 }, (_, revision) => pool.render([structuredClone(input)], {
+		revision, documentSeed: `draft-${revision}`, protectedIndexes: new Set(),
+	}));
+	const expected = drafts.map(snapshot => [
+		`[[LIVE_CONTEXT version=${snapshot.version} revision=${snapshot.revision} document=${snapshot.documentId} baseline=${snapshot.baselineDigest}]]`,
+		"# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact.",
+		...snapshot.blocks.map(block => `${block.header}\n${block.body}`),
+	].join("\n\n"));
+	for (const [index, snapshot] of drafts.entries()) {
+		const descriptor = Object.getOwnPropertyDescriptor(snapshot, "text")!;
+		assert.equal(typeof descriptor.get, "function", "a draft must not retain a flattened full document");
+		assert.equal(descriptor.value, undefined);
+		assert.equal(snapshot.text, expected[index]);
+		assert.equal(snapshot.text, renderContextDocument([input], { revision: index, documentSeed: `draft-${index}`, protectedIndexes: new Set() }).text);
+		assert.equal(snapshot.messages[0], drafts[0].messages[0]);
+	}
+	(input.content as { text: string }[])[0].text = "mutated source";
+	const changed = pool.render([input], { documentSeed: "changed" });
+	assert.match(changed.text, /mutated source/);
+	pool.clear();
+	assert.equal(drafts[0].text, expected[0], "reset cannot invalidate a still-owned draft");
+	// Core callers may pass mutable objects. Lazy text must keep the same captured
+	// rendering even if those objects or the returned block descriptors are edited.
+	const plain = renderContextDocument([input]); const original = plain.text;
+	(input.content as { text: string }[])[0].text = "changed again";
+	plain.blocks[0].body = "changed descriptor"; plain.blocks[0].header = "changed header";
+	assert.equal(plain.text, original);
 });

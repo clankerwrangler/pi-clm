@@ -15,7 +15,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { applyContextDocument, digestMessages, renderContextDocument } from "./context-document.ts";
+import { applyContextDocument, digestMessages } from "./context-document.ts";
 import { SnapshotMessages } from "./snapshot-messages.ts";
 import {
 	CONTINUITY_SIZE_WARNING_TOKENS,
@@ -1479,7 +1479,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 		// Extension-managed continuity is appended after the editable projection so
 		// mirror compression cannot silently remove an active obligation or exact pin.
-		const snapshot = renderContextDocument(snapshots.capture(effectiveMessages), {
+		const snapshot = snapshots.render(effectiveMessages, {
 			revision: state.revision,
 			protectedIndexes: editingMode === "clm" ? new Set<number>() : undefined,
 			documentSeed: randomUUID(),

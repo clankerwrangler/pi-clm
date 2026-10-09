@@ -177,6 +177,9 @@ export interface RenderContextDocumentOptions {
 export function renderContextDocument(
 	messages: LiveContextMessage[],
 	options: RenderContextDocumentOptions = {},
+	// SnapshotMessages supplies a body cache only for its detached immutable messages.
+	renderBody = (source: LiveContextMessage, escaped: boolean): string =>
+		escaped ? escapeStructuralLines(renderMessage(source)) : renderMessage(source),
 ): ContextDocumentSnapshot {
 	const revision = options.revision ?? 0;
 	const protectedIndexes = options.protectedIndexes ?? selectProtectedMessageIndexes(messages);
@@ -196,16 +199,15 @@ export function renderContextDocument(
 			role,
 			protected: protectedBlock,
 			header: `[[CTX_TURN document=${currentDocumentId} index=${index + 1} role=${role} id=${id} protected=${protectedBlock}]]`,
-			body: stable ? escapeStructuralLines(renderMessage(source)) : renderMessage(source),
+			body: renderBody(source, stable),
 			source,
 		};
 	});
-	const renderedBlocks = blocks.map((block) => `${block.header}\n${block.body}`);
-	const text = [
+	const fragments = [
 		`[[LIVE_CONTEXT version=${DOCUMENT_VERSION} revision=${revision} document=${currentDocumentId} baseline=${baselineDigest}]]`,
-		"# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact.",
-		...renderedBlocks,
-	].join("\n\n");
+		"\n\n# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact.",
+	];
+	for (const block of blocks) fragments.push("\n\n", block.header, "\n", block.body);
 
 	return {
 		version: DOCUMENT_VERSION,
@@ -213,7 +215,9 @@ export function renderContextDocument(
 		baselineDigest,
 		documentId: currentDocumentId,
 		stableDocument: stable,
-		text,
+		// Keep immutable fragments, not one flattened full-document copy per draft.
+		// Capture their values here so later source/block mutation cannot change text.
+		get text() { return fragments.join(""); },
 		messages: [...messages],
 		blocks,
 	};
