@@ -70,7 +70,9 @@ Both paths reject non-regular files and candidates over 16 MiB; metadata-free at
 submissions are rejected because they have no source-bound completion owner.
 
 The last 16 published snapshots are retained per accepted revision. Snapshot objects share
-unchanged immutable message clones. New requests and appended raw messages do not by
+unchanged immutable message clones by content, including raw prefixes replaced by the active
+projection. A digest indexes candidates; full content equality validates reuse across the
+SDK's fresh request objects. The cache retains only messages owned by published drafts. New requests and appended raw messages do not by
 themselves invalidate a draft. Revision, source-prefix, model, branch, reset, disable,
 reload, and expiry conflicts reject it rather than rebind it to newer context. Temporary
 mirrors and unfinished drafts do not survive reload; accepted checkpoints do.
@@ -203,6 +205,7 @@ with explicit truncation markers. See [how-it-works.md](how-it-works.md) for con
 | `src/context-document.ts` | Rendering, parsing, protection, role lowering, native normalization |
 | `src/projection.ts`, `src/state.ts` | Prefix checks, suffix rebasing, branch-local checkpoints |
 | `src/continuity.ts` | Durable source annotations and bounded recall |
+| `src/snapshot-messages.ts` | Content-validated immutable snapshots and draft-owned cache lifetime |
 | `src/mirror-store.ts` | Private atomic snapshots, submission claims, temporary cleanup |
 | `src/mirror-guard.ts` | Classification of mirror-reading/writing tool calls |
 | `src/policy.ts`, `src/budget.ts` | Conservative policy, budgets, calibration, reminders |

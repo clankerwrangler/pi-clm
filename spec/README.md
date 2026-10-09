@@ -7,7 +7,7 @@ implementation and integration tests cover those boundaries separately.
 From `spec/`, set `TLA_TOOLS_JAR` to the local TLA+ tools jar:
 
 ```sh
-for model in ProjectionEditing ContextSafety MirrorLifecycle FinalBoundary ToolExposure Maintenance AutomaticCompactionPolicy; do
+for model in ProjectionEditing ContextSafety MirrorLifecycle SnapshotOwnership FinalBoundary ToolExposure Maintenance AutomaticCompactionPolicy; do
   java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
     -config "$model.cfg" "$model.tla"
 done
@@ -51,6 +51,23 @@ The bounded instance has two context-read generations and at most two accepted o
 invalidated revisions: **56,811 generated / 6,276 distinct states**, no violations.
 TypeScript tests cover the actual metadata/source guards, 16-snapshot expiry, late
 submissions, failure injection, persistence, and file lifetime.
+
+## Snapshot ownership
+
+`SnapshotOwnership.tla` distinguishes request identity, immutable content, snapshot
+references, and cache ownership. Repeated captures share equal content; changed content
+cannot replace an older draft's value. Expiry and reset release cache ownership without
+reducing the draft window. The bounded instance (three drafts, six requests, two content
+values) passed **1,822 generated / 967 distinct states**. Disabling sharing, content
+validation, or release fails `SharedPayload`, `Isolation`, or `OwnedOnly`, respectively.
+
+`ContextSafety` and `MirrorLifecycle` model snapshot eligibility and lifecycle, not
+allocated payload copies. Their generation/revision bounds do not bound retained bytes.
+The ownership model adds the missing symbolic relationship, not a JavaScript heap or GC
+proof. Implementation tests cover nested source mutation, digest-equivalent but different
+objects, owner release, and real SDK context dispatch with fresh objects. The dispatch
+regression retains all 16 drafts, checks one unchanged payload copy, and accepts the oldest
+valid draft. A scaled synthetic heap probe separately checks retained-memory behavior.
 
 ## Direct mirror lifecycle
 

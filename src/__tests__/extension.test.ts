@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createEventBus, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createEventBus, ExtensionRunner, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { LIVE_CONTEXT_ANNOTATION, sourceContentHash } from "../continuity.ts";
 import liveContextExtension from "../index.ts";
@@ -2216,4 +2216,40 @@ describe("completed direct mirror edits", () => {
 		assert.equal(revision(h), 0);
 		assert(h.notifications.some((text) => /persistence failed/.test(text)));
 	});
+});
+
+
+test("stock context dispatch shares pruned raw payloads while all 16 drafts remain usable", async (t) => {
+	const raw = [{ role: "user" as const, content: "synthetic payload ".repeat(256), timestamp: 1, snapshotProbe: true }];
+	const checkpoint = createProjectionCheckpoint({ revision: 1, sourceMessages: raw,
+		projectedMessages: [{ role: "user", content: "Retained summary", timestamp: 1 }], beforeEstimate: 1000, afterEstimate: 10 });
+	const harness = createHarness([{ type: "custom", customType: LIVE_CONTEXT_STATE,
+		data: { version: 1, enabled: true, revision: 1, checkpoint } }]);
+	liveContextExtension(harness.pi, { editingMode: "clm" });
+	await emit(harness, "session_start", {});
+	const prompt = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+	const path = String(prompt[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+	const clone = globalThis.structuredClone;
+	let payloadCopies = 0;
+	t.mock.method(globalThis, "structuredClone", (value: any, options?: any) => {
+		if (value?.snapshotProbe === true) payloadCopies++;
+		return clone(value, options);
+	});
+	const runner = { createContext: () => harness.ctx, extensions: [{ path: "synthetic-clm", handlers: harness.handlers }],
+		emitError: (error: any) => { throw new Error(error.error); } } as unknown as ExtensionRunner;
+	try {
+		await ExtensionRunner.prototype.emitContext.call(runner, raw);
+		const oldest = await readFile(path, "utf8");
+		for (let request = 1; request < 16; request++) {
+			const output = await ExtensionRunner.prototype.emitContext.call(runner, raw);
+			assert.equal((output[0] as LiveContextMessage).content, "Retained summary");
+		}
+		assert.equal(payloadCopies, 1, "unchanged raw content must not be copied for each fresh SDK request");
+		await submit(path, `${oldest.split("\n")[0]}\nA new summary from the oldest valid draft.`);
+		await ExtensionRunner.prototype.emitContext.call(runner, raw);
+		assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1).data.revision, 2);
+		assert.equal(raw[0].content, "synthetic payload ".repeat(256));
+	} finally {
+		await emit(harness, "session_shutdown", {});
+	}
 });

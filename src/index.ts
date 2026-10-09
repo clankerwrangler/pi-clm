@@ -16,6 +16,7 @@ import {
 import { Type } from "typebox";
 
 import { applyContextDocument, digestMessages, renderContextDocument } from "./context-document.ts";
+import { SnapshotMessages } from "./snapshot-messages.ts";
 import {
 	CONTINUITY_SIZE_WARNING_TOKENS,
 	DEFAULT_RECALL_TOKENS,
@@ -236,15 +237,11 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let turnBaseline: TurnBaseline | undefined;
 	// Retain bounded immutable snapshots so unrelated requests do not race async writers.
 	const drafts = new Map<string, TurnBaseline & { model: string }>();
-	const immutableMessages = new WeakMap<LiveContextMessage, { digest: string; value: LiveContextMessage }>();
-	const snapshotMessages = (messages: LiveContextMessage[]) => messages.map((message) => {
-		const digest = digestMessages([message]);
-		const existing = immutableMessages.get(message);
-		if (existing?.digest === digest) return existing.value;
-		const value = structuredClone(message);
-		immutableMessages.set(message, { digest, value });
-		return value;
-	});
+	const snapshots = new SnapshotMessages();
+	function clearDrafts(): void {
+		drafts.clear();
+		snapshots.clear();
+	}
 	let contextPending: Promise<unknown> = Promise.resolve();
 	const activeInvocations = new Map<string, string>();
 	const completedInvocations = new Map<string, boolean>();
@@ -628,7 +625,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		} else {
 			persistOutcome({ ...state, enabled: false, event: { kind: "disabled", at: new Date().toISOString() } });
 			lifecycleEpoch++;
-			drafts.clear();
+			clearDrafts();
 			invalidateMirror();
 			turnBaseline = undefined;
 			currentContextView = undefined;
@@ -693,7 +690,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	function restore(ctx: ExtensionContext): void {
 		lifecycleEpoch++;
-		drafts.clear();
+		clearDrafts();
 		invalidateMirror();
 		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
 		state = reconstructLiveContextState(branch);
@@ -1271,7 +1268,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			case "off":
 				persistOutcome({ ...state, enabled: false, event: { kind: "disabled", at: new Date().toISOString() } });
 				lifecycleEpoch++;
-				drafts.clear();
+				clearDrafts();
 				invalidateMirror();
 				turnBaseline = undefined;
 				currentContextView = undefined;
@@ -1281,7 +1278,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			case "reset":
 				persist(resetProjectionState(state, "Projection reset by user."));
 				lifecycleEpoch++;
-				drafts.clear();
+				clearDrafts();
 				invalidateMirror();
 				turnBaseline = undefined;
 				currentContextView = undefined;
@@ -1325,7 +1322,14 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	function serializeContext<T>(operation: () => Promise<T>): Promise<T | undefined> {
 		const epoch = lifecycleEpoch;
-		const run = contextPending.then(() => epoch === lifecycleEpoch ? operation() : undefined);
+		const run = contextPending.then(async () => {
+			try {
+				return epoch === lifecycleEpoch ? await operation() : undefined;
+			} finally {
+				snapshots.retain([...drafts.values()].flatMap((draft) =>
+					[...draft.rawMessages, ...draft.effectiveMessages]));
+			}
+		});
 		contextPending = run.catch(() => undefined);
 		return run;
 	}
@@ -1343,7 +1347,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	}));
 	pi.on("model_select", () => {
 		lifecycleEpoch++;
-		drafts.clear();
+		clearDrafts();
 		invalidateMirror();
 		turnBaseline = undefined;
 	});
@@ -1475,12 +1479,12 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 		// Extension-managed continuity is appended after the editable projection so
 		// mirror compression cannot silently remove an active obligation or exact pin.
-		const snapshot = renderContextDocument(snapshotMessages(effectiveMessages), {
+		const snapshot = renderContextDocument(snapshots.capture(effectiveMessages), {
 			revision: state.revision,
 			protectedIndexes: editingMode === "clm" ? new Set<number>() : undefined,
 			documentSeed: randomUUID(),
 		});
-		const rawSnapshot = snapshotMessages(rawMessages);
+		const rawSnapshot = snapshots.capture(rawMessages);
 		const snapshotModel = modelIdentity(ctx);
 		try {
 			const activeStore = store;
@@ -1799,7 +1803,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			ctx.ui.notify("Live-context checkpoint persistence failed; previous revision retained.", "error");
 			return;
 		}
-		drafts.clear();
+		clearDrafts();
 		const managedContinuity = continuityMessage(ctx, result.messages);
 		const modelEffectiveMessages = managedContinuity
 			? [...result.messages, managedContinuity]
@@ -1830,7 +1834,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	pi.on("session_compact", async (_event, ctx) => {
 		persist(resetProjectionState(state, "Projection reset after native Pi compaction."));
 		lifecycleEpoch++;
-		drafts.clear();
+		clearDrafts();
 		invalidateMirror();
 		turnBaseline = undefined;
 		currentContextView = undefined;
@@ -1843,7 +1847,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		lifecycleEpoch++;
-		drafts.clear();
+		clearDrafts();
 		invalidateMirror();
 		turnBaseline = undefined;
 		currentContextView = undefined;
