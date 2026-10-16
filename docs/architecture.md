@@ -5,7 +5,8 @@
 Pi's append-only session is the source of truth. The extension stores branch-local
 projection checkpoints and annotations as public custom session entries; it does not
 rewrite raw messages or maintain a second history database. The mirror is a disposable
-view, not authoritative execution state. All integration uses the public Pi 0.99.1 SDK.
+view, not authoritative execution state. Integration uses public Pi SDK surfaces. Stock 0.99.1 retains its array hooks; the
+opt-in source path requires the SDK source-mode context/end dispatch.
 
 Three representations stay distinct:
 
@@ -69,13 +70,40 @@ active; final settlement still requires the all-writer and source-space gates.
 Both paths reject non-regular files and candidates over 16 MiB; metadata-free atomic
 submissions are rejected because they have no source-bound completion owner.
 
-The last 16 published snapshots are retained per accepted revision. Snapshot objects share
-unchanged immutable message clones by content, including raw prefixes replaced by the active
-projection. A digest indexes candidates; full content equality validates reuse across the
-SDK's fresh request objects. The cache retains only messages owned by published drafts. New requests and appended raw messages do not by
-themselves invalidate a draft. Revision, source-prefix, model, branch, reset, disable,
-reload, and expiry conflicts reject it rather than rebind it to newer context. Temporary
-mirrors and unfinished drafts do not survive reload; accepted checkpoints do.
+The last 16 published snapshots are retained per accepted revision. Legacy array
+hooks keep their detached, content-validated clone behavior. A digest indexes
+candidates; full value equality, including field presence, validates reuse.
+New requests and appended raw messages do not invalidate a draft. Revision,
+source-prefix, model, branch, reset, disable, reload and expiry conflicts reject
+it rather than rebind it to newer context. Temporary mirrors and unfinished
+drafts do not survive extension reload; accepted checkpoints do.
+
+On source-aware dispatch, `SnapshotMessages` captures new contributions into
+immutable payload files under the existing private `MirrorStore` before publishing
+a view. It retains no borrowed SDK read plan after capture, including plans whose
+unflushed descriptors hold pending values. Current projected and canonical-final
+captures keep independent prefix cursors and share exact equal payloads. Captured
+messages, rendered bodies, document frames and historical checkpoints stay owned
+by current views, the 16 drafts, recovery history and in-flight serialized work.
+Pruning removes files only after their final owner releases them. An exclusive
+create collision cannot remove an existing owned value. Failed capture publishes
+nothing; values that cannot be serialized keep their detached resident owner.
+
+Canonical JSON/newline SHA-256 prefix hashes retain the persisted checkpoint
+format. Unchanged prefixes reuse compact hash states and numeric visibility,
+usage, token and completion profiles; accepted projection plus new suffix is read
+for the next request. Explicit viewer, draft edit, recall and retry recovery reads
+still return genuine full values. Document reads reconstruct original framing and
+full source objects, including optional/opaque supported fields. Captured values
+remain exact when their former SDK source is overwritten or expires. The current
+active projection remains a full working value; old checkpoint payloads are read
+from captured files only for recovery/history operations.
+
+This bounds cold serialized payload retention and warm payload hydration on the
+source-only path, not all resident memory. Identity/location/hash/profile metadata
+grows with count. Explicit full-value reads, mutable public SDK arrays, genuine
+legacy consumers, unsupported serialization fallback and storage-failure working
+values can retain larger data. The existing canonical archive remains Pi-owned.
 
 ## Document validation and native spans
 

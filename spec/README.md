@@ -7,7 +7,7 @@ implementation and integration tests cover those boundaries separately.
 From `spec/`, set `TLA_TOOLS_JAR` to the local TLA+ tools jar:
 
 ```sh
-for model in ProjectionEditing ContextSafety MirrorLifecycle SnapshotOwnership RenderOwnership FinalBoundary ToolExposure Maintenance AutomaticCompactionPolicy; do
+for model in ProjectionEditing ContextSafety MirrorLifecycle SnapshotOwnership RenderOwnership FinalBoundary ToolExposure Maintenance AutomaticCompactionPolicy ContinuitySources; do
   java -XX:+UseParallelGC -cp "$TLA_TOOLS_JAR" tlc2.TLC -cleanup -workers 2 \
     -config "$model.cfg" "$model.tla"
 done
@@ -54,12 +54,16 @@ submissions, failure injection, persistence, and file lifetime.
 
 ## Snapshot ownership
 
-`SnapshotOwnership.tla` distinguishes request identity, immutable content, snapshot
-references, and cache ownership. Repeated captures share equal content; changed content
-cannot replace an older draft's value. Expiry and reset release cache ownership without
-reducing the draft window. The bounded instance (three drafts, six requests, two content
-values) passed **1,822 generated / 967 distinct states**. Disabling sharing, content
-validation, or release fails `SharedPayload`, `Isolation`, or `OwnedOnly`, respectively.
+`SnapshotOwnership.tla` distinguishes request identity, immutable content,
+file-backed values, the draft window, canonical-final capture and historical
+checkpoint owners. Repeated captures share equal values; overwritten sources
+cannot replace older captured values. Reset/expiry release only unowned files.
+Failed publication and exclusive-create collisions cannot destroy an earlier
+sole value. The current bounded instance passed **95,852 generated / 15,324 distinct
+states**, depth 10. Residency, failed-publication and collision-cleanup controls
+fail their corresponding ownership invariants. Parsing, byte serialization,
+JavaScript aliases and actual allocations are abstracted; TypeScript fixtures
+cover exact values and filesystem failure boundaries.
 
 `ContextSafety` and `MirrorLifecycle` model snapshot eligibility and lifecycle, not
 allocated payload copies. Their generation/revision bounds do not bound retained bytes.
@@ -127,3 +131,14 @@ generated / 2,477 distinct states**. Disabling sharing, lazy text, owner release
 or original framing fails the corresponding invariant. This is symbolic ownership,
 not a JavaScript rope/GC proof; SDK-boundary heap probes and reconstruction tests
 cover the implementation. The existing 16-draft window and edit rules are unchanged.
+
+## Continuity source reads
+
+`ContinuitySources.tla` checks branch-local active annotations, pin-only source
+hydration, duplicate source reuse, missing/changed-source diagnostics and
+unchanged continuity/pin/archive outcomes. The finite instance passed **7,776
+generated / 7,776 distinct states**. Normal context reads fetch distinct active
+pin sources through `getEntry`; pointer, resolved and archived annotations do not
+materialize source bodies. Explicit recall, viewer and full-history operations
+keep their complete requested results. The model abstracts source hashing and
+SDK storage; extension tests cover the actual getter calls and branch restore.

@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, readdir, readFile, rename, rm, stat, lstat, writeFile } from "node:fs/promises";
+import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -109,6 +110,33 @@ export class MirrorStore {
 		} finally {
 			await rm(claimed, { force: true });
 		}
+	}
+
+	/** Immutable captured-view payloads share this mirror's private lifetime. */
+	writeSnapshot(bytes: Uint8Array): string {
+		if (this.disposed) throw new Error("Mirror store has been disposed.");
+		const name = `.snapshot-${randomUUID()}`;
+		// Establish exclusive ownership before installing any failure cleanup. A failed
+		// create (including EEXIST) must never unlink another capture's sole value.
+		const file = openSync(join(this.directory, name), "wx", 0o600);
+		try { writeFileSync(file, bytes); }
+		catch (error) {
+			try { unlinkSync(join(this.directory, name)); } catch { /* Preserve the original write failure. */ }
+			throw error;
+		} finally { closeSync(file); }
+		return name;
+	}
+
+	readSnapshot(name: string): Buffer {
+		if (this.disposed) throw new Error("Mirror store has been disposed.");
+		if (!/^\.snapshot-[a-f0-9-]+$/.test(name)) throw new Error("Invalid snapshot reference.");
+		return readFileSync(join(this.directory, name));
+	}
+
+	removeSnapshot(name: string): void {
+		if (!/^\.snapshot-[a-f0-9-]+$/.test(name)) throw new Error("Invalid snapshot reference.");
+		try { unlinkSync(join(this.directory, name)); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 	}
 
 	async cleanup(): Promise<void> {

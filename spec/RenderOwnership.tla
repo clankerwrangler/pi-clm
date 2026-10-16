@@ -17,7 +17,8 @@ Request(value) ==
          extended == Append(drafts,[nonce |-> requests,ref |-> id, expected |-> value, full |-> ~Lazy])
          ds == IF Len(extended) > Limit THEN Tail(extended) ELSE extended
      IN /\ drafts' = ds
-        /\ heap' = IF reuse THEN heap ELSE heap @@ (id :> value)
+        /\ heap' = LET h == IF reuse THEN heap ELSE heap @@ (id :> value) IN
+           IF Release THEN [key \in Refs(ds) |-> h[key]] ELSE h
         /\ pool' = IF Release THEN Refs(ds) ELSE pool \cup {id}
         /\ nextId' = IF reuse THEN nextId ELSE nextId + 1
   /\ requests' = requests + 1 /\ UNCHANGED <<lastRead,expectedRead>>
@@ -26,7 +27,8 @@ Read(i) == /\ i \in 1..Len(drafts)
            /\ expectedRead' = <<drafts[i].nonce,drafts[i].expected>>
            /\ UNCHANGED <<drafts,heap,pool,nextId,requests>>
 Reset == /\ drafts' = <<>> /\ pool' = IF Release THEN {} ELSE pool
-         /\ UNCHANGED <<heap,nextId,requests,lastRead,expectedRead>>
+         /\ heap' = (IF Release THEN [i \in {} |-> "A"] ELSE heap)
+         /\ UNCHANGED <<nextId,requests,lastRead,expectedRead>>
 Next == (\E value \in Values: Request(value)) \/ (\E i \in 1..Len(drafts): Read(i)) \/ Reset
 Spec == Init /\ [][Next]_vars
 Window == Len(drafts) <= Limit
@@ -34,4 +36,5 @@ ExactText == lastRead = expectedRead
 SharedBodies == \A a,b \in pool: heap[a] = heap[b] => a = b
 NoFullText == \A i \in 1..Len(drafts): ~drafts[i].full
 OwnedOnly == pool = Refs(drafts)
+FileOwnership == DOMAIN heap = pool
 =============================================================================

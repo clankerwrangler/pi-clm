@@ -11,7 +11,12 @@ corepack pnpm check   # strict TypeScript check and all tests
 The tests cover projection validation, broad mixed-history editing and in-flight call admission, late file submissions,
 direct-tool completion and I/O races, final settlement/reopen and source-space deferral,
 conflicts and snapshot expiry, disabled-mode compaction, artifact lifetime and failures,
-public prompt options, helper exposure, settings, and the viewer. Tests do not require
+public prompt options, helper exposure, settings, and the viewer. Source-mode
+fixtures also check 16 captured drafts, exact full values after source expiration
+and overwrite, canonical/projected prefix reuse, historical checkpoint ownership,
+failed capture, exclusive-create collisions and final-owner cleanup. The source
+path requires a matching development SDK; default array compatibility remains
+covered against the pinned 0.99.1 dependency. Tests do not require
 provider credentials. Local mock lifecycle tests are not evidence of a live provider run.
 
 ## Safety models

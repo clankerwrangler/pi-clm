@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { access, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
@@ -71,4 +73,17 @@ describe("MirrorStore", () => {
 			await assert.rejects(store.write("late write"), /disposed/);
 		});
 	});
+});
+
+
+test("an exclusive snapshot create collision preserves the earlier owner's exact sole value", async () => {
+	const store = await MirrorStore.create("snapshot-collision");
+	const uuid = crypto.randomUUID;
+	try {
+		crypto.randomUUID = () => "00000000-0000-4000-8000-000000000000";
+		syncBuiltinESMExports();
+		const name = store.writeSnapshot(Buffer.from("original owned value"));
+		assert.throws(() => store.writeSnapshot(Buffer.from("unpublished replacement")), { code: "EEXIST" });
+		assert.equal(store.readSnapshot(name).toString(), "original owned value");
+	} finally { crypto.randomUUID = uuid; syncBuiltinESMExports(); await store.cleanup(); }
 });

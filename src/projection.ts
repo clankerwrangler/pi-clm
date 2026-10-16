@@ -1,6 +1,17 @@
 import { digestMessages } from "./context-document.ts";
 import type { ContextEditTrace, LiveContextMessage } from "./types.ts";
 
+/** A captured prefix supplies exact hashes and owned full-value range reads. */
+export type ProjectionSource = LiveContextMessage[] | {
+	readonly length: number;
+	digest(count?: number): string;
+	slice(start: number, end?: number): LiveContextMessage[];
+};
+
+export function projectionDigest(messages: ProjectionSource, count = messages.length): string {
+	return Array.isArray(messages) ? digestMessages(messages.slice(0, count)) : messages.digest(count);
+}
+
 export const PROJECTION_PREFIX_MISMATCH_REASON =
 	"Raw context prefix no longer matches the projection checkpoint.";
 
@@ -50,7 +61,7 @@ function isPersistedRetryError(message: LiveContextMessage): boolean {
 
 export function createProjectionCheckpoint(options: {
 	revision: number;
-	sourceMessages: LiveContextMessage[];
+	sourceMessages: ProjectionSource;
 	projectedMessages: LiveContextMessage[];
 	beforeEstimate: number;
 	afterEstimate: number;
@@ -62,7 +73,7 @@ export function createProjectionCheckpoint(options: {
 		version: 1,
 		revision: options.revision,
 		sourceMessageCount: options.sourceMessages.length,
-		sourceDigest: digestMessages(options.sourceMessages),
+		sourceDigest: projectionDigest(options.sourceMessages),
 		projectedMessages: [...options.projectedMessages],
 		beforeEstimate: options.beforeEstimate,
 		afterEstimate: options.afterEstimate,
@@ -81,28 +92,27 @@ export function createProjectionCheckpoint(options: {
  * it. A mismatch fails closed and returns the untouched raw context.
  */
 export function applyProjection(
-	rawMessages: LiveContextMessage[],
+	rawMessages: ProjectionSource,
 	checkpoint: ProjectionCheckpoint | undefined,
 ): ProjectionApplication {
 	if (!checkpoint) {
-		return { valid: true, messages: [...rawMessages], suffix: [] };
+		return { valid: true, messages: rawMessages.slice(0), suffix: [] };
 	}
 	if (checkpoint.version !== 1) {
-		return { valid: false, messages: [...rawMessages], reason: `Unsupported projection version: ${checkpoint.version}.` };
+		return { valid: false, messages: rawMessages.slice(0), reason: `Unsupported projection version: ${checkpoint.version}.` };
 	}
 	if (rawMessages.length < checkpoint.sourceMessageCount) {
 		return {
 			valid: false,
-			messages: [...rawMessages],
+			messages: rawMessages.slice(0),
 			reason: "Raw context is shorter than the projection source prefix.",
 		};
 	}
 
-	const sourcePrefix = rawMessages.slice(0, checkpoint.sourceMessageCount);
-	if (digestMessages(sourcePrefix) !== checkpoint.sourceDigest) {
+	if (projectionDigest(rawMessages, checkpoint.sourceMessageCount) !== checkpoint.sourceDigest) {
 		return {
 			valid: false,
-			messages: [...rawMessages],
+			messages: rawMessages.slice(0),
 			reason: PROJECTION_PREFIX_MISMATCH_REASON,
 		};
 	}

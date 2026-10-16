@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { createEventBus, ExtensionRunner, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { digestMessages } from "../context-document.ts";
 import { LIVE_CONTEXT_ANNOTATION, sourceContentHash } from "../continuity.ts";
 import liveContextExtension from "../index.ts";
 import clmExtension from "../../index.ts";
@@ -2253,4 +2254,144 @@ for (const pruned of [true, false]) test(`stock context dispatch shares ${pruned
 	} finally {
 		await emit(harness, "session_shutdown", {});
 	}
+});
+
+
+describe("ordinary continuity source hydration", () => {
+	test("reads only distinct active pin sources and preserves pointer/missing/changed behavior", async () => {
+		for (const state of ["none", "pointer", "pin", "missing", "changed"] as const) {
+			const source = { role: "user", content: "exact pinned original source", timestamp: 1 };
+			const sourceEntry = { type: "message", id: "pin-source", message: source };
+			const annotation = (id: string, retention: string, resolved = false) => ({
+				type: "custom", customType: LIVE_CONTEXT_ANNOTATION, data: {
+					version: 1, id, title: `title ${id}`, reason: "retain obligation", futureAction: "follow up",
+					retention, createdAt: "2026-01-01T00:00:00Z",
+					...(resolved ? { resolvedAt: "2026-01-02T00:00:00Z" } : {}),
+					source: { sessionId: "extension-test-session", entryId: "pin-source", revision: 0,
+						contentHash: sourceContentHash(source), role: "user" },
+				},
+			});
+			const annotations = state === "none" ? [] : [
+				annotation("lc-000000000001", state === "pointer" ? "continuity" : "pin"),
+				annotation("lc-000000000002", "archive"),
+				annotation("lc-000000000003", "pin", true),
+				...(state === "pointer" ? [] : [annotation("lc-000000000004", "pin")]),
+			];
+			const harness = createHarness([sourceEntry, ...annotations]);
+			liveContextExtension(harness.pi);
+			await emit(harness, "session_start", { type: "session_start", reason: "startup" });
+			let fullReads = 0;
+			const pointReads: string[] = [];
+			harness.ctx.sessionManager.getEntries = () => { fullReads++; throw new Error("unexpected full history hydration"); };
+			harness.ctx.sessionManager.getEntry = (id: string) => {
+				pointReads.push(id);
+				return state === "missing" ? undefined : state === "changed"
+					? { ...sourceEntry, message: { ...source, content: "changed source" } } : sourceEntry;
+			};
+			try {
+				const result = await emit(harness, "context", { type: "context", persistSources: false,
+					messages: [{ role: "user", content: "active request", timestamp: 2 }] });
+				const output = JSON.stringify(result);
+				assert.equal(fullReads, 0, state);
+				assert.deepEqual(pointReads, ["none", "pointer"].includes(state) ? [] : ["pin-source"], state);
+				if (state === "none") assert.doesNotMatch(output, /LIVE CONTEXT CONTINUITY/);
+				else {
+					assert.match(output, /lc-000000000001/);
+					assert.doesNotMatch(output, /lc-000000000002|lc-000000000003/);
+				}
+				if (state === "pin") assert.match(output, /exact pinned original source/);
+				if (state === "missing") assert.match(output, /Pin unavailable: Source entry pin-source is unavailable/);
+				if (state === "changed") assert.match(output, /failed its content-hash check/);
+			} finally {
+				await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
+			}
+		}
+	});
+
+	test("uses only restored active-branch annotations even when other sources remain addressable", async () => {
+		const source = { role: "user", content: "source shared by branches", timestamp: 1 };
+		const sourceEntry = { type: "message", id: "shared-source", message: source };
+		const annotation = (id: string) => ({ type: "custom", customType: LIVE_CONTEXT_ANNOTATION, data: {
+			version: 1, id, title: id, reason: "branch obligation", futureAction: "follow up", retention: "pin",
+			createdAt: "2026-01-01T00:00:00Z", source: { sessionId: "extension-test-session", entryId: "shared-source",
+				revision: 0, contentHash: sourceContentHash(source), role: "user" },
+		} });
+		const harness = createHarness([sourceEntry, annotation("lc-000000000001")]);
+		liveContextExtension(harness.pi);
+		await emit(harness, "session_start", { type: "session_start", reason: "startup" });
+		harness.ctx.sessionManager.getEntries = () => { throw new Error("unexpected full history hydration"); };
+		try {
+			const event = { type: "context", persistSources: false, messages: [{ role: "user", content: "active", timestamp: 2 }] };
+			assert.match(JSON.stringify(await emit(harness, "context", event)), /lc-000000000001/);
+			harness.branch.splice(0, harness.branch.length, sourceEntry, annotation("lc-000000000005"));
+			await emit(harness, "session_tree", { type: "session_tree" });
+			const output = JSON.stringify(await emit(harness, "context", event));
+			assert.match(output, /lc-000000000005/);
+			assert.doesNotMatch(output, /lc-000000000001/);
+		} finally { await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" }); }
+	});
+});
+
+
+describe("source-aware captured context lifecycle", () => {
+	function sourceFixture(values: LiveContextMessage[], scope = "committed") {
+		let reads = 0, valid = true;
+		const captured = structuredClone(values);
+		const source = { length: values.length, contributions: values.map((value, index) => ({ key: `${scope}:${index}:${digestMessages([value])}`, role: value.role })),
+			read(index: number) { assert.ok(valid); reads++; return structuredClone(captured[index]); },
+			validate() { assert.ok(valid); } };
+		return { source, reads: () => reads, expire() { valid = false; captured[0].content = "overwritten after unflushed source committed"; } };
+	}
+
+	test("checkpoint shortening avoids warm raw reads while all 16 captured drafts and final acceptance remain valid", async () => {
+		const raw = rawConversation();
+		const projected = [raw[0], { role: "assistant", content: "small checkpoint", timestamp: 2 }];
+		const checkpoint = createProjectionCheckpoint({ revision: 1, sourceMessages: raw, projectedMessages: projected, beforeEstimate: 1000, afterEstimate: 10 });
+		const harness = createHarness([{ type: "custom", id: "checkpoint", customType: LIVE_CONTEXT_STATE, data: { version: 1, enabled: true, revision: 1, checkpoint } }]);
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { type: "session_start", reason: "resume" });
+		const before = await emit(harness, "before_agent_start", { type: "before_agent_start", systemPrompt: "base", prompt: "task" });
+		const mirror = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+		let oldest = "";
+		for (let index = 0; index < 16; index++) {
+			const fixture = sourceFixture(raw);
+			const result = (await emit(harness, "context_source", { type: "context_source", source: fixture.source }))[0];
+			assert.ok(result.source, "the SDK source dispatch consumes an owned source, not an ignored array result");
+			assert.deepEqual(result.source.readAll(), projected);
+			assert.equal(fixture.reads(), index === 0 ? raw.length : 0);
+			fixture.expire();
+			if (index === 0) oldest = await readFile(mirror, "utf8");
+		}
+		await harness.commands.get("clm").handler("status", harness.ctx);
+		assert.match(harness.notifications.at(-1)!, /CLM on/);
+		await submit(mirror, oldest.split("\n")[0] + "\n\nExact oldest captured draft remains editable.");
+		const final = sourceFixture(raw);
+		await emit(harness, "agent_end_source", { type: "agent_end_source", source: final.source });
+		assert.equal(final.reads(), 0, "final certification uses compact prefix and completion facts");
+		const accepted = harness.branch.filter(entry => entry.customType === LIVE_CONTEXT_STATE).at(-1).data;
+		assert.equal(accepted.revision, 2);
+		assert.match(JSON.stringify(accepted.checkpoint.projectedMessages), /oldest captured draft/);
+		const next = (await emit(harness, "context_source", { type: "context_source", source: sourceFixture(raw).source }))[0].source.readAll();
+		assert.doesNotMatch(JSON.stringify(next), /large output/);
+		await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
+		await assert.rejects(readFile(mirror));
+	});
+
+	test("edited or shorter sources reject old drafts without substituting their captured values", async () => {
+		for (const change of ["edit", "branch"]) {
+			const raw = rawConversation(); const harness = createHarness();
+			liveContextExtension(harness.pi, { editingMode: "clm" });
+			await emit(harness, "session_start", { type: "session_start", reason: "startup" });
+			await emit(harness, "context_source", { type: "context_source", source: sourceFixture(raw).source });
+			const before = await emit(harness, "before_agent_start", { type: "before_agent_start", systemPrompt: "base", prompt: "task" });
+			const mirror = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+			const old = await readFile(mirror, "utf8");
+			await submit(mirror, old.split("\n")[0] + "\n\nRejected old source.");
+			const changed = change === "branch" ? raw.slice(0, 1) : [raw[0], { ...raw[1], content: "same ID rewritten in new generation" }];
+			const output = (await emit(harness, "context_source", { type: "context_source", source: sourceFixture(changed, "reloaded").source }))[0].source.readAll();
+			assert.match(JSON.stringify(output), /expired or conflicting snapshot/);
+			assert.equal(harness.branch.some(entry => entry.data?.lastOutcome?.kind === "applied"), false);
+			await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
+		}
+	});
 });
