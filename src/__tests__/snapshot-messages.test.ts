@@ -220,3 +220,19 @@ test("historical checkpoint payloads remain exact file-backed owners across draf
 		assert.deepEqual(await readdir(store.directory), []);
 	} finally { await store.cleanup(); }
 });
+
+
+test("direct comparison text owns exact file-backed code units through pruning and releases its last owner", async () => {
+	const store = await MirrorStore.create("snapshot-direct-text");
+	try {
+		const pool = new SnapshotMessages();
+		const text = "exact direct candidate\n\ud800\u0000\udfff";
+		const saved = pool.captureText(text, store);
+		assert.ok(saved.file);
+		pool.retainCaptured([saved]);
+		assert.equal(saved.read(), text, "not a UTF-8 digest or normalized substitute");
+		assert.equal((await readdir(store.directory)).length, 1);
+		pool.retainCaptured([]);
+		assert.deepEqual(await readdir(store.directory), []);
+	} finally { await store.cleanup(); }
+});

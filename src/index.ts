@@ -15,7 +15,7 @@ import {
 import { Type } from "typebox";
 
 import { applyContextDocument, digestMessages } from "./context-document.ts";
-import { CapturedCheckpoint, CapturedDocument, CapturedMessages, SnapshotMessages, type SnapshotMessageSource, type MessageProfile } from "./snapshot-messages.ts";
+import { CapturedCheckpoint, CapturedDocument, CapturedMessages, CapturedValue, SnapshotMessages, type SnapshotMessageSource, type MessageProfile } from "./snapshot-messages.ts";
 import {
 	CONTINUITY_SIZE_WARNING_TOKENS,
 	DEFAULT_RECALL_TOKENS,
@@ -283,7 +283,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	const activeInvocations = new Map<string, string>();
 	const completedInvocations = new Map<string, boolean>();
 	let invocationGeneration = 0;
-	let lastDirectText: string | undefined;
+	// Source-mode comparison reuses captured files, not a retained joined mirror.
+	let lastDirectText: string | CapturedDocument | CapturedValue<string> | undefined;
 	let publishedBaseline: CapturedBaseline | undefined;
 
 	function canonicalCompletions(rawMessages: RawMessages): boolean {
@@ -1451,6 +1452,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 					...(Array.isArray(draft.rawMessages) ? draft.rawMessages : []), ...(draft.effectiveMessages ?? []),
 				]));
 				snapshots.retainCaptured([
+					...(typeof lastDirectText === "object" ? [lastDirectText] : []),
 					...(currentRawCapture ? [currentRawCapture] : []),
 					...(finalRawCapture ? [finalRawCapture] : []),
 					...checkpointHistory.filter((checkpoint): checkpoint is CapturedCheckpoint => checkpoint instanceof CapturedCheckpoint),
@@ -1461,7 +1463,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				]);
 			}
 		});
-		contextPending = run.catch(() => undefined);
+		// The sequencing tail owns completion, not the caller's potentially large result.
+		contextPending = run.then(() => undefined, () => undefined);
 		return run;
 	}
 
@@ -1670,7 +1673,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 					model: snapshotModel,
 				};
 				publishedBaseline = { ...turnBaseline, model: snapshotModel };
-				lastDirectText = snapshotText;
+				lastDirectText = snapshot instanceof CapturedDocument ? snapshot : snapshotText;
 				completedInvocations.clear();
 				drafts.set(snapshot instanceof CapturedDocument ? snapshot.frame.documentId : snapshot.documentId, publishedBaseline);
 				while (drafts.size > 16) drafts.delete(drafts.keys().next().value!);
@@ -1865,8 +1868,14 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				const failed = [...completedInvocations.values()].some(Boolean) || (rawMessages instanceof CapturedMessages ? rawMessages.failedResults(completedInvocations) : rawMessages.some((message) =>
 					message.role === "toolResult" && completedInvocations.has(String(message.toolCallId)) && message.isError));
 				completedInvocations.clear();
-				if (editedText === undefined || editedText === lastDirectText) return;
+				const previousText = lastDirectText instanceof CapturedDocument ? lastDirectText.readText()
+					: lastDirectText instanceof CapturedValue ? lastDirectText.read() : lastDirectText;
+				if (editedText === undefined || editedText === previousText) return;
 				lastDirectText = editedText;
+				if (rawMessages instanceof CapturedMessages) {
+					try { lastDirectText = snapshots.captureText(editedText, activeStore); }
+					catch { /* A failed optional spill must not disable an otherwise valid edit. */ }
+				}
 				if (failed) {
 					queueOutcomeNotice("Edit rejected: the writing invocation did not complete successfully. Read the current mirror and retry the edit.");
 					return;

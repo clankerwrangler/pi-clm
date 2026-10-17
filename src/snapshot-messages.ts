@@ -25,7 +25,7 @@ export interface MessageProfile {
 	isError?: boolean;
 }
 
-class CapturedValue<T> {
+export class CapturedValue<T> {
 	readonly file?: string;
 	private readonly resident?: T;
 	constructor(readonly store: MirrorStore, value: T) {
@@ -193,15 +193,21 @@ export class SnapshotMessages {
 		return new CapturedDocument({ version, revision, baselineDigest, documentId, stableDocument }, captured, blocks);
 	}
 
+	/** Direct-write deduplication owns exact changed text without pinning its rendering. */
+	captureText(text: string, store: MirrorStore): CapturedValue<string> {
+		return this.own(store, text);
+	}
+
 	captureCheckpoint(checkpoint: ProjectionCheckpoint, store: MirrorStore): CapturedCheckpoint {
 		return new CapturedCheckpoint(this.own(store, checkpoint), checkpoint);
 	}
 
 	/** Call only with all current/draft/view/in-flight owners, after serialized work. */
-	retainCaptured(owners: Iterable<CapturedMessages | CapturedDocument | CapturedCheckpoint>): void {
+	retainCaptured(owners: Iterable<CapturedMessages | CapturedDocument | CapturedCheckpoint | CapturedValue<unknown>>): void {
 		const values = new Set<CapturedValue<unknown>>();
 		const records = new Set<CapturedMessage>();
 		for (const owner of owners) {
+			if (owner instanceof CapturedValue) { values.add(owner); continue; }
 			if (owner instanceof CapturedCheckpoint) { values.add(owner.value); continue; }
 			const messages = owner instanceof CapturedDocument ? owner.messages : owner;
 			for (const item of messages.items) {

@@ -11,6 +11,7 @@ import { LIVE_CONTEXT_ANNOTATION, sourceContentHash } from "../continuity.ts";
 import liveContextExtension from "../index.ts";
 import clmExtension from "../../index.ts";
 import { MirrorStore } from "../mirror-store.ts";
+import { CapturedDocument, SnapshotMessages, type CapturedValue } from "../snapshot-messages.ts";
 import {
 	createProjectionCheckpoint,
 	PROJECTION_PREFIX_MISMATCH_REASON,
@@ -2375,6 +2376,98 @@ describe("source-aware captured context lifecycle", () => {
 		assert.doesNotMatch(JSON.stringify(next), /large output/);
 		await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
 		await assert.rejects(readFile(mirror));
+	});
+
+	test("serialized source calls preserve independent full results and recover after rejection", async (t) => {
+		const raw = rawConversation(); const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", {});
+		t.after(() => emit(harness, "session_shutdown", {}));
+		let entered!: () => void, release!: () => void;
+		const staged = new Promise<void>(resolve => { entered = resolve; });
+		const resume = new Promise<void>(resolve => { release = resolve; });
+		const write = MirrorStore.prototype.write;
+		let writes = 0;
+		t.mock.method(MirrorStore.prototype, "write", async function(this: MirrorStore, text: string, guard: () => boolean) {
+			if (++writes === 1) { entered(); await resume; }
+			return write.call(this, text, guard);
+		});
+		const firstFixture = sourceFixture(raw);
+		const first = emit(harness, "context_source", { source: firstFixture.source });
+		await staged;
+		const grown = [...raw, { role: "user", content: "later request only", timestamp: 20 }];
+		const secondFixture = sourceFixture(grown);
+		const second = emit(harness, "context_source", { source: secondFixture.source });
+		await Promise.resolve();
+		assert.equal(writes, 1); assert.equal(secondFixture.reads(), 0, "later work waits for the earlier completion");
+		release();
+		const left = (await first)[0].source, right = (await second)[0].source;
+		assert.notEqual(left, right);
+		assert.deepEqual(left.readAll(), raw); assert.deepEqual(right.readAll(), grown);
+		firstFixture.expire(); secondFixture.expire();
+		const detached = left.readAll(); detached[0].content = "caller mutation";
+		assert.deepEqual(left.readAll(), raw, "caller results remain exact independent snapshots");
+		await assert.rejects(emit(harness, "context_source", { source: {
+			length: 0, contributions: [], read() { throw new Error("unexpected read"); },
+			validate() { throw new Error("synthetic source rejection"); },
+		} }), /synthetic source rejection/);
+		const recovered = (await emit(harness, "context_source", { source: sourceFixture(grown).source }))[0].source;
+		assert.deepEqual(recovered.readAll(), grown, "a rejected operation cannot poison serialization");
+		assert.deepEqual(left.readAll(), raw, "neither pruning nor failed successors own a caller's result");
+	});
+
+	for (const spillFailure of [false, true]) test(`direct source comparisons survive failed writers, pruning and ${spillFailure ? "spill failure" : "file-backed retention"}`, async (t) => {
+		const raw = rawConversation(); const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", {});
+		t.after(() => emit(harness, "session_shutdown", {}));
+		const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+		const mirror = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+		await emit(harness, "context_source", { source: sourceFixture(raw).source });
+		const baseline = await readFile(mirror, "utf8");
+		let textReads = 0, captures = 0;
+		let saved: CapturedValue<string> | undefined;
+		const readText = CapturedDocument.prototype.readText;
+		t.mock.method(CapturedDocument.prototype, "readText", function(this: CapturedDocument) {
+			textReads++; return readText.call(this);
+		});
+		const captureText = SnapshotMessages.prototype.captureText;
+		t.mock.method(SnapshotMessages.prototype, "captureText", function(this: SnapshotMessages, text: string, store: MirrorStore) {
+			captures++;
+			if (spillFailure) throw new Error("optional spill unavailable");
+			return saved = captureText.call(this, text, store);
+		});
+		const canonical = [...raw];
+		async function complete(id: string, failed = false) {
+			await emit(harness, "tool_call", { toolCallId: id, toolName: "ipython", input: {} });
+			canonical.push({ role: "assistant", content: [{ type: "toolCall", id, name: "ipython", arguments: {} }], timestamp: 10 });
+			const result = { role: "toolResult", toolCallId: id, toolName: "ipython", content: [{ type: "text", text: "done" }], isError: failed, timestamp: 11 };
+			await emit(harness, "tool_result", result);
+			canonical.push(result);
+			await emit(harness, "agent_end_source", { source: sourceFixture(canonical).source });
+		}
+		const revision = () => harness.branch.filter(entry => entry.customType === LIVE_CONTEXT_STATE && entry.data.checkpoint).at(-1)?.data.revision ?? 0;
+		await complete("no-edit");
+		assert.equal(textReads, 1, "unchanged comparison reconstructs the already captured document");
+		assert.equal(captures, 0, "publication does not store a second whole document");
+		assert.equal(revision(), 0);
+		const candidate = compactSecondTurn(baseline);
+		await writeFile(mirror, candidate);
+		await complete("failed-writer", true);
+		assert.equal(revision(), 0);
+		assert.equal(captures, 1);
+		if (!spillFailure) assert.equal(saved!.read(), candidate, "failed candidates remain exact comparison owners");
+		await complete("unrelated-success");
+		assert.equal(revision(), 0, "an unchanged failed candidate cannot become a successful edit");
+		assert.equal(captures, 1, "unchanged candidates are not recaptured");
+		await writeFile(mirror, candidate.replace("parser.ts is the only relevant file.", "done."));
+		await complete("valid-retry");
+		assert.equal(revision(), 1, "optional spill failure cannot disable valid editing");
+		assert.equal(captures, 2);
+		const lastCandidate = saved;
+		await emit(harness, "model_select", {});
+		await emit(harness, "context_source", { source: sourceFixture(canonical).source });
+		if (lastCandidate) assert.throws(() => lastCandidate.read(), /ENOENT/, "invalidation releases the last comparison file");
 	});
 
 	test("edited or shorter sources reject old drafts without substituting their captured values", async () => {

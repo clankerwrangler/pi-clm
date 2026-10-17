@@ -132,13 +132,20 @@ violations. A stock-SDK test checks the actual public registry contract.
 ## Rendered snapshot ownership
 
 `RenderOwnership.tla` separates immutable rendered bodies, per-draft framing, and
-materialized full text. Every retained draft reconstructs its original framing
-and content, while equal bodies share storage and no draft owns a flattened full
-document. The bounded instance (three drafts, five requests) passed **7,712
-generated / 2,477 distinct states**. Disabling sharing, lazy text, owner release,
-or original framing fails the corresponding invariant. This is symbolic ownership,
-not a JavaScript rope/GC proof; SDK-boundary heap probes and reconstruction tests
-cover the implementation. The existing 16-draft window and edit rules are unchanged.
+materialized full text, including the direct-write unchanged-comparison owner.
+Publication reuses its captured document; changed candidates remain owned through
+draft pruning, and invalidation releases them. Every retained read reconstructs
+its exact original text without retaining a joined document in source mode.
+The bounded instance (three drafts, five requests, two edits) passed **110,827
+generated / 17,153 distinct states**. The retained-direct-text control fails
+`NoDirectFullText`; retaining a successful result in the completion-only serialization
+tail fails `NoTailPayload`. The original operation result still belongs to its caller.
+The model assumes successful file storage; implementation tests
+also preserve editing with a resident comparison fallback if an optional spill fails.
+This is symbolic ownership, not a JavaScript heap/GC proof. Exact reconstruction,
+failed/repeated writers, serialized success/failure, independent caller results, reset
+and spill-failure tests cover the concrete boundary.
+The existing 16-draft window and edit rules are unchanged.
 
 ## Continuity source reads
 
