@@ -144,9 +144,15 @@ export function toOutcomeEntry(state: LiveContextState): LiveContextState {
  * mismatch on the newest stored checkpoint means no checkpoint is active.
  */
 export function reconstructLiveContextState(entries: SessionEntryLike[]): LiveContextState {
+	return reconstructLiveContextStateNewestFirst((function* () {
+		for (let index = entries.length - 1; index >= 0; index--) yield entries[index];
+	})());
+}
+
+/** Same state selection for lazy archive reads; stops before unrelated older payloads. */
+export function reconstructLiveContextStateNewestFirst(entries: Iterable<SessionEntryLike>): LiveContextState {
 	let latest: LiveContextState | undefined;
-	for (let index = entries.length - 1; index >= 0; index--) {
-		const entry = entries[index];
+	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== LIVE_CONTEXT_STATE) continue;
 		if (!isLiveContextState(entry.data)) continue;
 		if (!latest) {

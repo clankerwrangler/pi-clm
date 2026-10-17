@@ -73,6 +73,14 @@ objects, owner release, and real SDK context dispatch with fresh objects. The di
 regression retains all 16 drafts, checks one unchanged payload copy, and accepts the oldest
 valid draft. A scaled synthetic heap probe separately checks retained-memory behavior.
 
+`ColdRestore.tla` checks active-only startup payload reads and generation-fenced
+historical reads, separately from already captured immutable values. The finite
+instance passed **86 generated / 49 distinct states**; eager-history and expired-read
+controls fail their intended invariants. Parsing, selected-branch validity and byte
+digests are abstracted; cold-restore extension tests and SDK entry-source tests cover
+those concrete boundaries. Remaining initial archive indexing and active-checkpoint
+reads are linear in their respective input sizes.
+
 ## Direct mirror lifecycle
 
 `MirrorLifecycle.tla` checks tool admission during context I/O, partial writes, terminal

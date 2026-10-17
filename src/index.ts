@@ -84,6 +84,7 @@ import {
 	initialLiveContextState,
 	reconstructLiveContextHistory,
 	reconstructLiveContextState,
+	reconstructLiveContextStateNewestFirst,
 	resetProjectionState,
 	toOutcomeEntry,
 } from "./state.ts";
@@ -197,6 +198,17 @@ function sameMessageSequence(left: LiveContextMessage[], right: LiveContextMessa
 	return left.length === right.length && left.every((message, index) => message === right[index]);
 }
 
+interface EntrySource {
+	readonly entries: readonly { readonly type: string; readonly customType?: string }[];
+	readonly branch: readonly number[];
+	read(index: number): ContinuitySessionEntryLike;
+	validate(): void;
+}
+type SourceManager = {
+	buildSessionEntrySource?(): EntrySource;
+	buildSessionSource?(): SnapshotMessageSource & { readonly contributions: readonly { readonly key: string; readonly role?: string }[] };
+};
+
 type RawMessages = LiveContextMessage[] | CapturedMessages;
 type CapturedBaseline = {
 	rawMessages: RawMessages;
@@ -306,8 +318,20 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let finalRawCapture: CapturedMessages | undefined;
 	let annotations: LiveContextAnnotation[] = [];
 	let checkpointHistory: (ProjectionCheckpoint | CapturedCheckpoint)[] = [];
+	// Unread restored history is borrowed, not an immutable captured snapshot.
+	let restoredHistory: (() => ProjectionCheckpoint[]) | undefined;
 	const checkpointRevision = (checkpoint: ProjectionCheckpoint | CapturedCheckpoint) => checkpoint instanceof CapturedCheckpoint ? checkpoint.frame.revision : checkpoint.revision;
-	const readCheckpointHistory = () => checkpointHistory.map(checkpoint => checkpoint instanceof CapturedCheckpoint ? checkpoint.read() : checkpoint);
+	const readOwnedHistory = () => checkpointHistory.map(checkpoint => checkpoint instanceof CapturedCheckpoint ? checkpoint.read() : checkpoint);
+	function readCheckpointHistory(): ProjectionCheckpoint[] {
+		if (restoredHistory) {
+			const historical = restoredHistory(); // Reject expired sources before publishing any history.
+			const revisions = new Set(checkpointHistory.map(checkpointRevision));
+			checkpointHistory = [...historical.filter(checkpoint => !revisions.has(checkpoint.revision)).map(captureCheckpoint), ...checkpointHistory]
+				.sort((left, right) => checkpointRevision(left) - checkpointRevision(right));
+			restoredHistory = undefined;
+		}
+		return readOwnedHistory();
+	}
 	const pressure = new PressureTracker();
 	const continuitySize = new ContinuitySizeTracker();
 	let budgetPolicy = resolveBudgetPolicy(options.budget);
@@ -484,7 +508,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	}
 
 	/** Calibrated sizes for status text: the next request, and raw vs sent messages. */
-	function sizeFigures(ctx: ExtensionContext): {
+	function sizeFigures(ctx: ExtensionContext, full = true): {
 		next?: number;
 		observed?: number;
 		budget?: number;
@@ -500,14 +524,16 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const replaced = projectionReplaced && !measured;
 		// Before the first request of this runtime (e.g. after resume), sizes come from the
 		// session: the provider's count of the last request, and a rebuilt snapshot.
-		const snapshot = measured ? currentContextView! : contextSnapshot(ctx);
-		const sessionObserved = reading || replaced ? undefined : lastProviderReportedTokens(currentRawCapture ?? snapshot.rawMessages ?? []);
+		const sourceManager = ctx.sessionManager as unknown as SourceManager;
+		const snapshot = measured ? currentContextView! : full || !sourceManager.buildSessionSource ? contextSnapshot(ctx) : undefined;
+		const sessionObserved = reading || replaced ? undefined : currentRawCapture || snapshot?.rawMessages
+			? lastProviderReportedTokens(currentRawCapture ?? snapshot?.rawMessages ?? []) : sourceObservation(sourceManager);
 		const sessionObservedStale = sessionObserved !== undefined && state.checkpoint !== undefined &&
 			sessionObserved.index < state.checkpoint.sourceMessageCount;
 		return {
 			// Without a reading for the current budget (e.g. just after a settings change), estimate
 			// the next request from the context snapshot the same way the reading does.
-			next: reading?.estimated ?? (measured || replaced ? estimateRequestTokens(ctx, snapshot.effectiveMessages) : undefined),
+			next: reading?.estimated ?? (snapshot && (measured || replaced) ? estimateRequestTokens(ctx, snapshot.effectiveMessages) : undefined),
 			observed: reading ? (reading.observedStale ? undefined : reading.observed) : sessionObservedStale ? undefined : sessionObserved?.tokens,
 			budget: resolved?.budget,
 			budgetSource: resolved?.source,
@@ -516,10 +542,25 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		};
 	}
 
+	/** Footer observation uses the producing selection, never a full transcript snapshot. */
+	function sourceObservation(manager: SourceManager): { tokens: number; index: number } | undefined {
+		const source = manager.buildSessionSource?.();
+		if (!source) return undefined;
+		source.validate();
+		for (let index = source.length - 1; index >= 0; index--) {
+			const role = source.contributions[index].role;
+			if (role !== undefined && role !== "assistant") continue;
+			const observed = lastProviderReportedTokens([source.read(index) as LiveContextMessage]);
+			if (observed) { source.validate(); return { tokens: observed.tokens, index }; }
+		}
+		source.validate();
+		return undefined;
+	}
+
 	/** Footer: `clm 346k / 1.0m · r2` (calibrated estimate of the next request against the budget). */
 	function clmFooterText(ctx: ExtensionContext): string {
 		if (!state.enabled) return `clm off · r${state.revision}`;
-		const { next, observed, budget } = sizeFigures(ctx);
+		const { next, observed, budget } = sizeFigures(ctx, false);
 		const shown = next ?? observed;
 		const size = shown === undefined ? "" : ` ${formatTokens(shown)}${budget ? ` / ${formatTokens(budget)}` : ""}`;
 		return `clm${size} · r${state.revision}`;
@@ -718,12 +759,12 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	async function replaceStore(ctx: ExtensionContext): Promise<void> {
 		activeInvocations.clear();
 		invalidateMirror();
-		checkpointHistory = readCheckpointHistory();
+		checkpointHistory = readOwnedHistory();
 		await store?.cleanup().catch(() => undefined);
 		store = undefined;
 		try {
 			store = await MirrorStore.create(ctx.sessionManager.getSessionId());
-			checkpointHistory = readCheckpointHistory().map(captureCheckpoint);
+			checkpointHistory = readOwnedHistory().map(captureCheckpoint);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			pendingNotice = `[LIVE CONTEXT] Could not initialize the private mirror: ${message}`;
@@ -731,20 +772,43 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 	}
 
+	function checkpoints(branch: ContinuitySessionEntryLike[]): ProjectionCheckpoint[] {
+		return reconstructLiveContextHistory(branch).flatMap(snapshot => snapshot.checkpoint ? [snapshot.checkpoint] : [])
+			.filter((checkpoint, index, all) => all.findIndex(candidate => candidate.revision === checkpoint.revision) === index)
+			.sort((left, right) => left.revision - right.revision);
+	}
+
 	function restore(ctx: ExtensionContext): void {
 		lifecycleEpoch++;
 		clearDrafts();
 		invalidateMirror();
-		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
-		state = reconstructLiveContextState(branch);
-		checkpointHistory = reconstructLiveContextHistory(branch)
-			.flatMap((snapshot) => snapshot.checkpoint ? [snapshot.checkpoint] : [])
-			.filter((checkpoint, index, checkpoints) =>
-				checkpoints.findIndex((candidate) => candidate.revision === checkpoint.revision) === index,
-			)
-			.sort((left, right) => left.revision - right.revision);
-		annotations = reconstructLiveContextAnnotations(branch);
-		restoreSettings(branch);
+		const source = (ctx.sessionManager as unknown as SourceManager).buildSessionEntrySource?.();
+		restoredHistory = undefined;
+		if (source) {
+			source.validate();
+			const positions = source.branch.filter(index => source.entries[index].type === "custom" && source.entries[index].customType === LIVE_CONTEXT_STATE);
+			state = reconstructLiveContextStateNewestFirst((function* () {
+				for (let index = positions.length - 1; index >= 0; index--) yield source.read(positions[index]);
+			})());
+			checkpointHistory = [];
+			restoredHistory = () => {
+				source.validate();
+				const entries = positions.map(position => source.read(position));
+				source.validate();
+				return checkpoints(entries);
+			};
+			const settingsBranch = source.branch.filter(index => source.entries[index].type === "custom" &&
+				[LIVE_CONTEXT_ANNOTATION, CLM_SETTINGS_ENTRY].includes(source.entries[index].customType ?? "")).map(index => source.read(index));
+			annotations = reconstructLiveContextAnnotations(settingsBranch);
+			restoreSettings(settingsBranch);
+			source.validate();
+		} else {
+			const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
+			state = reconstructLiveContextState(branch);
+			checkpointHistory = checkpoints(branch);
+			annotations = reconstructLiveContextAnnotations(branch);
+			restoreSettings(branch);
+		}
 		turnBaseline = undefined;
 		currentContextView = undefined;
 			currentRawCapture = undefined;
@@ -1958,6 +2022,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		restoredHistory = undefined;
+		checkpointHistory = [];
 		lifecycleEpoch++;
 		clearDrafts();
 		invalidateMirror();
