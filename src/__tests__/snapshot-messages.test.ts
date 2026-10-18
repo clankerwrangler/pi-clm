@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Hash } from "node:crypto";
 import { test } from "node:test";
 
 import { renderContextDocument } from "../context-document.ts";
@@ -235,4 +236,48 @@ test("direct comparison text owns exact file-backed code units through pruning a
 		pool.retainCaptured([]);
 		assert.deepEqual(await readdir(store.directory), []);
 	} finally { await store.cleanup(); }
+});
+
+
+test("unchanged private prefix states share across 16 owners; public copies and rebases stay isolated", async () => {
+	const store = await MirrorStore.create("source-prefix-sharing");
+	const originalCopy = Hash.prototype.copy;
+	let copies = 0;
+	Hash.prototype.copy = function (...args) { copies++; return originalCopy.apply(this, args); };
+	try {
+		const pool = new SnapshotMessages();
+		const profile = () => ({ tokens: 1, visible: true });
+		let values = [message("first"), message("second"), message("third")];
+		let keys = ["a", "b", "c"];
+		let live = true;
+		const source = () => ({ length: values.length, contributions: keys.map(key => ({ key })),
+			read(index: number) { assert.ok(live); return values[index]; }, validate() { assert.ok(live); } });
+		const first = pool.captureSource(source(), store, profile);
+		assert.equal(copies, 3);
+		const views = [first];
+		for (let i = 1; i < 16; i++) views.push(pool.captureSource(source(), store, profile));
+		assert.equal(copies, 3, "unchanged captures must not copy any native hash state");
+		const expected = digestMessages(values);
+		first.prefix(2).update("public mutable copy");
+		assert.equal(first.digest(), expected);
+		assert.equal(views[15].digest(), expected);
+		assert.equal(Object.hasOwn(first, "prefixes"), false, "stored hash states must not escape as a property");
+		values = [values[0], message("replacement"), values[2]]; keys = ["a", "b-new", "c"];
+		let before = copies;
+		const changed = pool.captureSource(source(), store, profile, first);
+		assert.equal(copies - before, 2, "only prefixes following the changed contribution extend copies");
+		assert.equal(changed.digest(), digestMessages(values));
+		assert.equal(first.digest(), expected);
+		values = values.slice(1); keys = keys.slice(1); before = copies;
+		const rebased = pool.captureSource(source(), store, profile, changed);
+		assert.equal(copies - before, 2, "same items at different positions are not the same prefix");
+		assert.equal(rebased.digest(), digestMessages(values));
+		live = false;
+		assert.throws(() => pool.captureSource(source(), store, profile), { code: "ERR_ASSERTION" });
+		pool.retainCaptured([first, rebased]);
+		assert.equal(first.digest(), expected, "captured prefixes survive source expiry and competing-owner close");
+		assert.deepEqual(rebased.readAll(), values);
+		pool.retainCaptured([]);
+		assert.deepEqual(await readdir(store.directory), []);
+	} finally { Hash.prototype.copy = originalCopy; await store.cleanup(); }
 });

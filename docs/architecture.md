@@ -90,8 +90,11 @@ create collision cannot remove an existing owned value. Failed capture publishes
 nothing; values that cannot be serialized keep their detached resident owner.
 
 Canonical JSON/newline SHA-256 prefix hashes retain the persisted checkpoint
-format. Unchanged prefixes reuse compact hash states and numeric visibility,
-usage, token and completion profiles; accepted projection plus new suffix is read
+format. Unchanged prefixes share private immutable hash states between captures; public
+hash access and changed-prefix extension copy before mutation. Per-view vectors
+still grow with message count, but unchanged drafts do not duplicate native hash
+states. Numeric visibility, usage, token and completion profiles are reused;
+accepted projection plus new suffix is read
 for the next request. Explicit viewer, draft edit, recall and retry recovery reads
 still return genuine full values. Document reads reconstruct original framing and
 full source objects, including optional/opaque supported fields. Captured values

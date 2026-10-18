@@ -54,7 +54,24 @@ interface CapturedMessage {
 
 /** Owned values, not a borrowed SDK plan or a lazy array. */
 export class CapturedMessages {
-	constructor(readonly items: readonly CapturedMessage[], private readonly prefixes: readonly Hash[]) {}
+	readonly #prefixes: readonly Hash[];
+	private constructor(readonly items: readonly CapturedMessage[], prefixes: readonly Hash[]) { this.#prefixes = prefixes; }
+
+	/** Consume one value at a time. Stored hash states are private and never
+	 * updated; only copies cross a mutable boundary or extend a changed prefix. */
+	static capture(records: Iterable<{ item: CapturedMessage; message?: LiveContextMessage }>, previous?: CapturedMessages): CapturedMessages {
+		const items: CapturedMessage[] = [];
+		const prefixes: Hash[] = [previous ? previous.#prefixes[0] : createHash("sha256")];
+		let unchanged = true;
+		for (const { item, message } of records) {
+			const index = items.length;
+			items.push(item);
+			unchanged &&= previous?.items[index] === item;
+			prefixes.push(unchanged ? previous!.#prefixes[index + 1] :
+				prefixes[index].copy().update(canonicalMessage(message ?? item.value.read())).update("\n"));
+		}
+		return new CapturedMessages(items, prefixes);
+	}
 	get length(): number { return this.items.length; }
 	read(index: number): LiveContextMessage {
 		const item = this.items[index];
@@ -67,9 +84,9 @@ export class CapturedMessages {
 	}
 	digest(count = this.length): string {
 		if (!Number.isSafeInteger(count) || count < 0 || count > this.length) throw new RangeError("Invalid captured prefix.");
-		return this.prefixes[count].copy().digest("hex");
+		return this.#prefixes[count].copy().digest("hex");
 	}
-	prefix(count: number): Hash { return this.prefixes[count].copy(); }
+	prefix(count: number): Hash { return this.#prefixes[count].copy(); }
 	get visibleTokens(): number { return this.items.reduce((total, item) => total + (item.profile.visible ? item.profile.tokens : 0), 0); }
 	observed(): { tokens: number; index: number } | undefined {
 		for (let index = this.length - 1; index >= 0; index--) {
@@ -130,28 +147,23 @@ export class SnapshotMessages {
 		const before = new Set(this.capturedValues);
 		const added = new Set<string>();
 		try {
-			const items: CapturedMessage[] = [];
-			const prefixes: Hash[] = [createHash("sha256")];
-			let unchanged = true;
-			for (let index = 0; index < source.length; index++) {
-				const key = source.contributions[index].key;
-				let item = this.sourceValues.get(key);
-				let message: LiveContextMessage | undefined;
-				if (!item || item.value.store !== store) {
-					message = source.read(index) as LiveContextMessage;
-					const digest = digestMessages([message]);
-					const equal = this.valueBuckets.get(digest)?.find(candidate => candidate.value.store === store && isDeepStrictEqual(candidate.value.read(), message));
-					item = { key, digest, value: equal?.value ?? this.own(store, message), profile: equal?.profile ?? profile(message), bodies: equal?.bodies ?? {} };
-					this.sourceValues.set(key, item); added.add(key);
+			const captured = CapturedMessages.capture((function* (pool: SnapshotMessages) {
+				for (let index = 0; index < source.length; index++) {
+					const key = source.contributions[index].key;
+					let item = pool.sourceValues.get(key);
+					let message: LiveContextMessage | undefined;
+					if (!item || item.value.store !== store) {
+						message = source.read(index) as LiveContextMessage;
+						const digest = digestMessages([message]);
+						const equal = pool.valueBuckets.get(digest)?.find(candidate => candidate.value.store === store && isDeepStrictEqual(candidate.value.read(), message));
+						item = { key, digest, value: equal?.value ?? pool.own(store, message), profile: equal?.profile ?? profile(message), bodies: equal?.bodies ?? {} };
+						pool.sourceValues.set(key, item); added.add(key);
+					}
+					yield { item, message };
 				}
-				items.push(item);
-				unchanged &&= previous?.items[index] === item;
-				prefixes.push(unchanged ? previous!.prefix(index + 1) :
-					prefixes[index].copy().update(canonicalMessage(message ?? item.value.read())).update("\n"));
-			}
+			})(this), previous);
 			source.validate();
-			const captured = new CapturedMessages(items, prefixes);
-			for (const item of items) if (added.has(item.key)) {
+			for (const item of captured.items) if (added.has(item.key)) {
 				const digest = item.digest;
 				const bucket = this.valueBuckets.get(digest) ?? [];
 				bucket.push(item); this.valueBuckets.set(digest, bucket);

@@ -73,6 +73,15 @@ objects, owner release, and real SDK context dispatch with fresh objects. The di
 regression retains all 16 drafts, checks one unchanged payload copy, and accepts the oldest
 valid draft. A scaled synthetic heap probe separately checks retained-memory behavior.
 
+`PrefixOwnership.tla` checks shared private immutable prefix states across retained
+and in-flight captures, predecessor close, rebase/expiry, and defensive public
+copies. Its finite instance passes **2,961 generated / 636 distinct states**.
+The copy, changed-prefix reuse, public-alias and expired-publication controls fail
+their intended invariants. Hash bytes, GC and filesystem storage are abstracted.
+The snapshot fixture counts actual native `Hash.copy()` calls: sixteen unchanged
+captures add no copies, while changed and rebased suffixes still produce exact
+digests. Existing source-expiry, draft/history and final-file-owner cases remain.
+
 `ColdRestore.tla` checks active-only startup payload reads and generation-fenced
 historical reads, separately from already captured immutable values. The finite
 instance passed **86 generated / 49 distinct states**; eager-history and expired-read
