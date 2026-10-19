@@ -22,8 +22,7 @@ pi install git:github.com/clankerwrangler/pi-clm
 pi -e git:github.com/clankerwrangler/pi-clm
 ```
 
-Tested against Pi 0.99.1. This source-only package is marked private; no fork npm
-release is available. Repository access is required while the source is private.
+Tested against Pi 0.99.1. This fork is distributed directly from GitHub.
 
 ## Quick start
 
