@@ -5,17 +5,56 @@ import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 const STALE_MIRROR_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const OWNER_FILE = ".owner";
+
+interface MirrorOwner {
+	pid: number;
+	/** Linux process start time; distinguishes a reused PID. Absent where /proc is unavailable. */
+	start?: string;
+}
 
 function safeSessionId(sessionId: string): string {
 	const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 48);
 	return safe || "session";
 }
 
+function processStartTime(pid: number): string | undefined {
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		// The command name can contain spaces and parentheses; fields after the final ')' start at state.
+		return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+	} catch {
+		return undefined;
+	}
+}
+
+function ownerAlive(owner: MirrorOwner): boolean {
+	try {
+		process.kill(owner.pid, 0);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
+	}
+	const start = processStartTime(owner.pid);
+	return owner.start === undefined || start === undefined || start === owner.start;
+}
+
+async function readOwner(directory: string): Promise<MirrorOwner | undefined> {
+	try {
+		const owner = JSON.parse(await readFile(join(directory, OWNER_FILE), "utf8")) as Partial<MirrorOwner>;
+		if (!Number.isSafeInteger(owner.pid) || (owner.pid ?? 0) <= 0) return undefined;
+		return { pid: owner.pid!, ...(typeof owner.start === "string" ? { start: owner.start } : {}) };
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Best-effort removal of mirror directories left behind by sessions that never reached
- * shutdown. Live sessions rewrite their mirror every turn, so a directory whose mtime
- * is older than the threshold has no owner. Failures are ignored: another process may
- * remove or own an entry concurrently.
+ * shutdown. A directory whose recorded owner process has exited is removed at once, so
+ * crashed sessions do not leave large snapshots behind. Directories without an owner
+ * record fall back to age: live sessions rewrite their mirror every turn, so one older
+ * than the threshold has no owner. Failures are ignored: another process may remove or
+ * own an entry concurrently.
  */
 async function sweepStaleMirrors(parentDirectory: string, keepDirectory: string, maxAgeMs: number): Promise<void> {
 	let names: string[];
@@ -31,7 +70,10 @@ async function sweepStaleMirrors(parentDirectory: string, keepDirectory: string,
 		if (directory === keepDirectory) continue;
 		try {
 			const info = await stat(directory);
-			if (!info.isDirectory() || info.mtimeMs >= cutoff) continue;
+			if (!info.isDirectory()) continue;
+			const owner = await readOwner(directory);
+			const orphaned = owner ? !ownerAlive(owner) : info.mtimeMs < cutoff;
+			if (!orphaned) continue;
 			await rm(directory, { recursive: true, force: true });
 		} catch {
 			// Ignored: sweeping is opportunistic hygiene only.
@@ -59,6 +101,9 @@ export class MirrorStore {
 		const prefix = join(parentDirectory, `pi-live-context-${safeSessionId(sessionId)}-`);
 		const directory = await mkdtemp(prefix);
 		await chmod(directory, 0o700);
+		const start = processStartTime(process.pid);
+		const owner: MirrorOwner = { pid: process.pid, ...(start ? { start } : {}) };
+		await writeFile(join(directory, OWNER_FILE), JSON.stringify(owner), { mode: 0o600 });
 		await sweepStaleMirrors(parentDirectory, directory, staleAgeMs).catch(() => undefined);
 		return new MirrorStore(directory);
 	}
