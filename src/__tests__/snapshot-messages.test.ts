@@ -7,6 +7,9 @@ import { MirrorStore } from "../mirror-store.ts";
 import { createProjectionCheckpoint } from "../projection.ts";
 import { digestMessages } from "../context-document.ts";
 import { readdir } from "node:fs/promises";
+
+/** Snapshot payload files only; the mirror also holds its owner record. */
+const snapshotFiles = async (directory: string) => (await readdir(directory)).filter((name) => name.startsWith(".snapshot-"));
 import { SnapshotMessages } from "../snapshot-messages.ts";
 import type { LiveContextMessage } from "../types.ts";
 
@@ -129,11 +132,11 @@ test("source captures own exact old values, share 16 prefixes, and release files
 			assert.equal(view.items.every(item => item.value.file !== undefined), true);
 		}
 		pool.retainCaptured(views);
-		assert.equal((await readdir(store.directory)).length, 16);
+		assert.equal((await snapshotFiles(store.directory)).length, 16);
 		pool.retainCaptured([views[15]]);
 		assert.deepEqual(views[15].readAll(), originals[15]);
 		pool.retainCaptured([]);
-		assert.deepEqual(await readdir(store.directory), []);
+		assert.deepEqual(await snapshotFiles(store.directory), []);
 	} finally { await store.cleanup(); }
 });
 
@@ -146,7 +149,7 @@ test("captured documents share full-value payloads but preserve each frame and u
 		const documents = Array.from({ length: 16 }, (_, index) => pool.captureDocument([input], store, profile,
 			{ revision: 0, documentSeed: `frame-${index}` }));
 		assert.equal(new Set(documents.map(document => document.messages.items[0])).size, 1);
-		assert.equal((await readdir(store.directory)).length, 2, "one message and one escaped body, not 16 whole document copies");
+		assert.equal((await snapshotFiles(store.directory)).length, 2, "one message and one escaped body, not 16 whole document copies");
 		for (const [index, document] of documents.entries()) {
 			const expected = renderContextDocument([input], { revision: 0, documentSeed: `frame-${index}` });
 			assert.equal(document.readText(), expected.text);
@@ -159,7 +162,7 @@ test("captured documents share full-value payloads but preserve each frame and u
 		const plain = pool.captureDocument([message("body\n[[CTX_TURN quoted")], store, profile, { documentSeed: "without-undefined" });
 		assert.notEqual(plain.messages.items[0], documents[0].messages.items[0], "canonical equality is not full-value equivalence");
 		pool.retainCaptured([]);
-		assert.deepEqual(await readdir(store.directory), []);
+		assert.deepEqual(await snapshotFiles(store.directory), []);
 	} finally { await store.cleanup(); }
 });
 
@@ -174,7 +177,7 @@ test("failed capture publishes nothing and cannot retain a borrowed source or de
 		assert.throws(() => pool.captureValues(input, store, profile), /synthetic disk failure/);
 		assert.equal(input[1].content, "new-b");
 		assert.deepEqual(kept.readAll(), [message("kept")]);
-		assert.equal((await readdir(store.directory)).length, 1, "unpublished captures must release their partial files");
+		assert.equal((await snapshotFiles(store.directory)).length, 1, "unpublished captures must release their partial files");
 		pool.retainCaptured([kept]);
 	} finally { await store.cleanup(); }
 });
@@ -190,7 +193,7 @@ test("canonical final and projected captures share exact file values while prese
 		const projected = pool.captureSource(source("projected"), store, profile);
 		const canonical = pool.captureSource(source("canonical"), store, profile);
 		assert.equal(projected.items[0].value, canonical.items[0].value);
-		assert.equal((await readdir(store.directory)).length, 1);
+		assert.equal((await snapshotFiles(store.directory)).length, 1);
 		pool.retainCaptured([projected, canonical]);
 		const nextProjected = pool.captureSource(source("projected"), store, profile, projected);
 		const nextCanonical = pool.captureSource(source("canonical"), store, profile, canonical);
@@ -198,7 +201,7 @@ test("canonical final and projected captures share exact file values while prese
 		assert.equal(nextProjected.digest(), nextCanonical.digest());
 		pool.retainCaptured([nextCanonical]);
 		assert.deepEqual(nextCanonical.readAll(), [message("unchanged exact value")]);
-		pool.retainCaptured([]); assert.deepEqual(await readdir(store.directory), []);
+		pool.retainCaptured([]); assert.deepEqual(await snapshotFiles(store.directory), []);
 	} finally { await store.cleanup(); }
 });
 
@@ -218,7 +221,7 @@ test("historical checkpoint payloads remain exact file-backed owners across draf
 		assert.deepEqual(captured.read(), expected);
 		assert.equal(Object.hasOwn(captured.read().projectedMessages[0], "additional"), true);
 		pool.retainCaptured([]);
-		assert.deepEqual(await readdir(store.directory), []);
+		assert.deepEqual(await snapshotFiles(store.directory), []);
 	} finally { await store.cleanup(); }
 });
 
@@ -232,9 +235,9 @@ test("direct comparison text owns exact file-backed code units through pruning a
 		assert.ok(saved.file);
 		pool.retainCaptured([saved]);
 		assert.equal(saved.read(), text, "not a UTF-8 digest or normalized substitute");
-		assert.equal((await readdir(store.directory)).length, 1);
+		assert.equal((await snapshotFiles(store.directory)).length, 1);
 		pool.retainCaptured([]);
-		assert.deepEqual(await readdir(store.directory), []);
+		assert.deepEqual(await snapshotFiles(store.directory), []);
 	} finally { await store.cleanup(); }
 });
 
@@ -278,6 +281,6 @@ test("unchanged private prefix states share across 16 owners; public copies and 
 		assert.equal(first.digest(), expected, "captured prefixes survive source expiry and competing-owner close");
 		assert.deepEqual(rebased.readAll(), values);
 		pool.retainCaptured([]);
-		assert.deepEqual(await readdir(store.directory), []);
+		assert.deepEqual(await snapshotFiles(store.directory), []);
 	} finally { Hash.prototype.copy = originalCopy; await store.cleanup(); }
 });
