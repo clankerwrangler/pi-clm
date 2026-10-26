@@ -30,6 +30,8 @@ export interface ProjectionCheckpoint {
 	editTrace?: ContextEditTrace;
 }
 
+export type ProjectionAnchor = Pick<ProjectionCheckpoint, "revision" | "sourceMessageCount" | "sourceDigest">;
+
 export type ProjectionApplication =
 	| {
 			valid: true;
@@ -140,7 +142,7 @@ export function applyProjection(
 export function recoverProjectionFromRetryErrors(
 	rawMessages: LiveContextMessage[],
 	checkpoint: ProjectionCheckpoint,
-	history: ProjectionCheckpoint[] = [],
+	history: readonly ProjectionAnchor[] = [],
 ): ProjectionRecovery {
 	const direct = applyProjection(rawMessages, checkpoint);
 	if (direct.valid) {

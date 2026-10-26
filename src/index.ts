@@ -82,6 +82,7 @@ import {
 import {
 	LIVE_CONTEXT_STATE,
 	initialLiveContextState,
+	isLiveContextState,
 	reconstructLiveContextHistory,
 	reconstructLiveContextState,
 	reconstructLiveContextStateNewestFirst,
@@ -204,7 +205,15 @@ interface EntrySource {
 	read(index: number): ContinuitySessionEntryLike;
 	validate(): void;
 }
+interface EntryReader {
+	readonly leafId: string | null;
+	readonly length: number;
+	getEntryHeader(index: number): { readonly key: string; readonly id: string; readonly parentId: string | null; readonly type: string; readonly customType?: string };
+	read(index: number, key: string): ContinuitySessionEntryLike;
+	validate(): void;
+}
 type SourceManager = {
+	buildSessionEntryReader?(): EntryReader;
 	buildSessionEntrySource?(): EntrySource;
 	buildSessionSource?(): SnapshotMessageSource & { readonly contributions: readonly { readonly key: string; readonly role?: string }[] };
 };
@@ -320,18 +329,30 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let annotations: LiveContextAnnotation[] = [];
 	let checkpointHistory: (ProjectionCheckpoint | CapturedCheckpoint)[] = [];
 	// Unread restored history is borrowed, not an immutable captured snapshot.
-	let restoredHistory: (() => ProjectionCheckpoint[]) | undefined;
-	const checkpointRevision = (checkpoint: ProjectionCheckpoint | CapturedCheckpoint) => checkpoint instanceof CapturedCheckpoint ? checkpoint.frame.revision : checkpoint.revision;
-	const readOwnedHistory = () => checkpointHistory.map(checkpoint => checkpoint instanceof CapturedCheckpoint ? checkpoint.read() : checkpoint);
-	function readCheckpointHistory(): ProjectionCheckpoint[] {
-		if (restoredHistory) {
-			const historical = restoredHistory(); // Reject expired sources before publishing any history.
-			const revisions = new Set(checkpointHistory.map(checkpointRevision));
-			checkpointHistory = [...historical.filter(checkpoint => !revisions.has(checkpoint.revision)).map(captureCheckpoint), ...checkpointHistory]
-				.sort((left, right) => checkpointRevision(left) - checkpointRevision(right));
-			restoredHistory = undefined;
-		}
-		return readOwnedHistory();
+	let restoredHistory: ((visit: (checkpoint: ProjectionCheckpoint) => void) => void) | undefined;
+	const checkpointFrame = (checkpoint: ProjectionCheckpoint | CapturedCheckpoint) => checkpoint instanceof CapturedCheckpoint ? checkpoint.frame : checkpoint;
+	const checkpointRevision = (checkpoint: ProjectionCheckpoint | CapturedCheckpoint) => checkpointFrame(checkpoint).revision;
+	const readCheckpoint = (checkpoint: ProjectionCheckpoint | CapturedCheckpoint) => checkpoint instanceof CapturedCheckpoint ? checkpoint.read() : checkpoint;
+	function loadCheckpointHistory(): void {
+		if (!restoredHistory) return;
+		const historical: (ProjectionCheckpoint | CapturedCheckpoint)[] = [];
+		const revisions = new Set(checkpointHistory.map(checkpointRevision));
+		// Validate the complete borrowed selection before publishing its captured owners.
+		// Capture each candidate before requesting another full payload.
+		restoredHistory(checkpoint => {
+			if (revisions.has(checkpoint.revision)) return;
+			revisions.add(checkpoint.revision);
+			historical.push(captureCheckpoint(checkpoint));
+		});
+		checkpointHistory = [...historical, ...checkpointHistory].sort((left, right) => checkpointRevision(left) - checkpointRevision(right));
+		restoredHistory = undefined;
+	}
+	function checkpointAnchors() {
+		loadCheckpointHistory();
+		return checkpointHistory.map(checkpoint => {
+			const { revision, sourceMessageCount, sourceDigest } = checkpointFrame(checkpoint);
+			return { revision, sourceMessageCount, sourceDigest };
+		});
 	}
 	const pressure = new PressureTracker();
 	const continuitySize = new ContinuitySizeTracker();
@@ -760,17 +781,19 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	async function replaceStore(ctx: ExtensionContext): Promise<void> {
 		activeInvocations.clear();
 		invalidateMirror();
-		checkpointHistory = readOwnedHistory();
-		await store?.cleanup().catch(() => undefined);
+		const previousStore = store;
 		store = undefined;
 		try {
 			store = await MirrorStore.create(ctx.sessionManager.getSessionId());
-			checkpointHistory = readOwnedHistory().map(captureCheckpoint);
+			// Migrate owned values before removing their old files, one at a time.
+			checkpointHistory = checkpointHistory.map(checkpoint => captureCheckpoint(readCheckpoint(checkpoint)));
 		} catch (error) {
+			checkpointHistory = checkpointHistory.map(readCheckpoint);
 			const message = error instanceof Error ? error.message : String(error);
 			pendingNotice = `[LIVE CONTEXT] Could not initialize the private mirror: ${message}`;
 			ctx.ui.notify(pendingNotice, "error");
 		}
+		await previousStore?.cleanup().catch(() => undefined);
 	}
 
 	function checkpoints(branch: ContinuitySessionEntryLike[]): ProjectionCheckpoint[] {
@@ -783,26 +806,60 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		lifecycleEpoch++;
 		clearDrafts();
 		invalidateMirror();
-		const source = (ctx.sessionManager as unknown as SourceManager).buildSessionEntrySource?.();
+		const manager = ctx.sessionManager as unknown as SourceManager;
+		const reader = manager.buildSessionEntryReader?.();
+		const source = reader ? undefined : manager.buildSessionEntrySource?.();
 		restoredHistory = undefined;
-		if (source) {
-			source.validate();
-			const positions = source.branch.filter(index => source.entries[index].type === "custom" && source.entries[index].customType === LIVE_CONTEXT_STATE);
+		if (reader || source) {
+			const validate = () => reader ? reader.validate() : source!.validate();
+			validate();
+			const selectedTypes = new Set([LIVE_CONTEXT_STATE, LIVE_CONTEXT_ANNOTATION, CLM_SETTINGS_ENTRY]);
+			const selected: { position: number; key: string; customType: string }[] = [];
+			if (reader) {
+				// IDs retain the full source's last-duplicate selection, including
+				// non-topological parents. Descriptors and off-branch keys are not retained.
+				const byId = new Map<string, number>();
+				for (let position = 0; position < reader.length; position++) byId.set(reader.getEntryHeader(position).id, position);
+				const seen = new Set<number>();
+				let position = reader.leafId === null ? undefined : byId.get(reader.leafId);
+				while (position !== undefined) {
+					if (seen.has(position)) throw new Error("Session branch contains a cycle");
+					seen.add(position);
+					const header = reader.getEntryHeader(position);
+					if (header.type === "custom" && selectedTypes.has(header.customType ?? "")) {
+						selected.push({ position, key: header.key, customType: header.customType! });
+					}
+					position = header.parentId === null ? undefined : byId.get(header.parentId);
+				}
+				selected.reverse();
+			} else {
+				for (const position of source!.branch) {
+					const header = source!.entries[position];
+					if (header.type === "custom" && selectedTypes.has(header.customType ?? "")) {
+						selected.push({ position, key: "", customType: header.customType! });
+					}
+				}
+			}
+			const positions = selected.filter(entry => entry.customType === LIVE_CONTEXT_STATE);
+			const read = (entry: typeof selected[number]) => reader ? reader.read(entry.position, entry.key) : source!.read(entry.position);
 			state = reconstructLiveContextStateNewestFirst((function* () {
-				for (let index = positions.length - 1; index >= 0; index--) yield source.read(positions[index]);
+				for (let index = positions.length - 1; index >= 0; index--) yield read(positions[index]);
 			})());
 			checkpointHistory = [];
-			restoredHistory = () => {
-				source.validate();
-				const entries = positions.map(position => source.read(position));
-				source.validate();
-				return checkpoints(entries);
+			restoredHistory = visit => {
+				validate();
+				const visitEntry = (position: typeof selected[number]) => {
+					const entry = read(position);
+					if (entry.type === "custom" && entry.customType === LIVE_CONTEXT_STATE &&
+						isLiveContextState(entry.data) && entry.data.checkpoint) visit(entry.data.checkpoint);
+				};
+				for (const position of positions) visitEntry(position);
+				validate();
 			};
-			const settingsBranch = source.branch.filter(index => source.entries[index].type === "custom" &&
-				[LIVE_CONTEXT_ANNOTATION, CLM_SETTINGS_ENTRY].includes(source.entries[index].customType ?? "")).map(index => source.read(index));
+			const settingsBranch = selected.filter(entry => entry.customType !== LIVE_CONTEXT_STATE).map(read);
 			annotations = reconstructLiveContextAnnotations(settingsBranch);
 			restoreSettings(settingsBranch);
-			source.validate();
+			validate();
 		} else {
 			const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
 			state = reconstructLiveContextState(branch);
@@ -840,9 +897,15 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			state.lastOutcome.message !== PROJECTION_PREFIX_MISMATCH_REASON
 		) return undefined;
 
-		for (const target of readCheckpointHistory().sort((left, right) => right.revision - left.revision)) {
-			const recovery = recoverProjectionFromRetryErrors(readRaw(rawMessages), target, readCheckpointHistory());
-			if (recovery.valid && recovery.removedErrorCount > 0) return { target, recovery };
+		const anchors = checkpointAnchors();
+		const tryCandidate = (checkpoint: ProjectionCheckpoint | CapturedCheckpoint) => {
+			const target = readCheckpoint(checkpoint);
+			const recovery = recoverProjectionFromRetryErrors(rawMessages, target, anchors);
+			return recovery.valid && recovery.removedErrorCount > 0 ? { target, recovery } : undefined;
+		};
+		for (let index = checkpointHistory.length - 1; index >= 0; index--) {
+			const recovered = tryCandidate(checkpointHistory[index]);
+			if (recovered) return recovered;
 		}
 		return undefined;
 	}
@@ -1555,7 +1618,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 		if (!projection.valid && state.checkpoint) {
 			const target = state.checkpoint;
-			const recovery = recoverProjectionFromRetryErrors(readRaw(rawMessages), target, readCheckpointHistory());
+			const recovery = recoverProjectionFromRetryErrors(readRaw(rawMessages), target, checkpointAnchors());
 			if (recovery.valid) {
 				rebaseRecoveredProjection(readRaw(rawMessages), target, recovery);
 				projection = recovery;

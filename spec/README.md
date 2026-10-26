@@ -90,6 +90,19 @@ digests are abstracted; cold-restore extension tests and SDK entry-source tests 
 those concrete boundaries. Remaining initial archive indexing and active-checkpoint
 reads are linear in their respective input sizes.
 
+`RecoveryOwnership.tla` checks selected-only retained metadata, sequential candidate
+materialization, captured-key expiry, and publication after the complete borrowed scan.
+The three-candidate instance passes **35 generated / 29 distinct states**; metadata-copy,
+parallel-read, redirected-read and stale-publication controls fail their intended
+invariants. Branch selection, duplicate IDs, digest validation, payload copies within
+one successful capture, GC and allocation sizes are abstracted. Existing resident
+fallbacks on storage failure remain available and are outside the one-candidate
+file-backed measurement. Extension tests cover ordering,
+fallback and expiry. `reader-recovery-probe.ts` measures actual SDK/CLM retained heap
+and simultaneously reachable candidates with a bounded public 65,536–70,000-entry
+fixture. It uses GC and experimental `v8.queryObjects()` only in that isolated process;
+its results are not RSS or live-worker savings.
+
 ## Direct mirror lifecycle
 
 `MirrorLifecycle.tla` checks tool admission during context I/O, partial writes, terminal

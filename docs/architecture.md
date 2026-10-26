@@ -99,13 +99,18 @@ for the next request. Explicit viewer, draft edit, recall and retry recovery rea
 still return genuine full values. Document reads reconstruct original framing and
 full source objects, including optional/opaque supported fields. Captured values
 remain exact when their former SDK source is overwritten or expires. The current
-active projection remains a full working value. With the matching SDK entry-source
-API, cold restore selects the latest valid state/current checkpoint without reading
-unrelated historical payloads. Unread historical candidates remain borrowed,
+active projection remains a full working value. With the matching SDK keyed entry-reader
+API, cold restore selects branch-local custom records without retaining a full archive
+metadata snapshot. Selection still scans headers and uses a temporary ID-position index;
+only selected record keys remain borrowed. Older SDKs use the full entry-source API,
+or full-branch restoration when neither API exists. Startup reads only the latest valid
+state/current checkpoint, not unrelated historical payloads. Unread historical candidates
+remain borrowed,
 generation- and committed-byte-fenced locators until explicit history/retry recovery
-validates and captures them into the existing mirror store. They reject reload or
-rewrite rather than rebind; already captured values retain their exact ownership.
-Legacy SDKs retain full-branch restoration. The automatic footer uses existing
+validates and captures them into the existing mirror store, one candidate at a time.
+Recovery compares compact anchor facts and materializes only the target being attempted.
+Borrowed locators reject changed keys, reload or rewrite rather than rebind;
+already captured values retain their exact ownership. The automatic footer uses existing
 measurements or targeted provider observations, not a full context snapshot;
 explicit status, viewer and export reads keep their complete results.
 
