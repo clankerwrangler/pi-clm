@@ -82,13 +82,15 @@ import {
 import {
 	LIVE_CONTEXT_STATE,
 	initialLiveContextState,
-	isLiveContextState,
+	readLiveContextState,
 	reconstructLiveContextHistory,
 	reconstructLiveContextState,
 	reconstructLiveContextStateNewestFirst,
 	resetProjectionState,
 	toOutcomeEntry,
+	toPersistedEntry,
 } from "./state.ts";
+import { checkpointStoreDirectory } from "./checkpoint-store.ts";
 import { buildCompactPrompt, loadCompactPrompt } from "./compact.ts";
 import {
 	applyOverrides,
@@ -279,6 +281,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	const editingMode = options.editingMode ?? "conservative";
 	const commandName = editingMode === "clm" ? "clm" : "live-context";
 	let state = initialLiveContextState();
+	/** Checkpoint bodies for the current session file; undefined persists them inline. */
+	let checkpointDirectory: string | undefined;
 	let store: MirrorStore | undefined;
 	let turnBaseline: CapturedBaseline | undefined;
 	// Retain bounded immutable snapshots so unrelated requests do not race async writers.
@@ -767,7 +771,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	}
 
 	function persist(nextState: typeof state): void {
-		pi.appendEntry(LIVE_CONTEXT_STATE, nextState);
+		pi.appendEntry(LIVE_CONTEXT_STATE, toPersistedEntry(nextState, checkpointDirectory));
 		state = nextState;
 		rememberCheckpoint(state.checkpoint);
 	}
@@ -809,6 +813,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const manager = ctx.sessionManager as unknown as SourceManager;
 		const reader = manager.buildSessionEntryReader?.();
 		const source = reader ? undefined : manager.buildSessionEntrySource?.();
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		checkpointDirectory = sessionFile ? checkpointStoreDirectory(sessionFile) : undefined;
 		restoredHistory = undefined;
 		if (reader || source) {
 			const validate = () => reader ? reader.validate() : source!.validate();
@@ -850,8 +856,9 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				validate();
 				const visitEntry = (position: typeof selected[number]) => {
 					const entry = read(position);
-					if (entry.type === "custom" && entry.customType === LIVE_CONTEXT_STATE &&
-						isLiveContextState(entry.data) && entry.data.checkpoint) visit(entry.data.checkpoint);
+					if (entry.type !== "custom" || entry.customType !== LIVE_CONTEXT_STATE) return;
+					const checkpoint = readLiveContextState(entry.data)?.checkpoint;
+					if (checkpoint) visit(checkpoint);
 				};
 				for (const position of positions) visitEntry(position);
 				validate();

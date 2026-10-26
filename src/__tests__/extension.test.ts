@@ -1915,6 +1915,62 @@ test("persisted overflow links survive mirror deletion, resume, and same-host br
 	}
 });
 
+test("file-backed checkpoints store message bodies once, outside the session entry", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-clm-session-"));
+	const sessionFile = join(directory, "session.jsonl");
+	const harness = createHarness();
+	harness.ctx.sessionManager.getSessionFile = () => sessionFile;
+	liveContextExtension(harness.pi, { editingMode: "clm", overflow: { mode: "off" } });
+	await emit(harness, "session_start", {});
+	try {
+		const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+		const path = before[0].systemPrompt.match(/mirrored at `([^`]+)`/)[1] as string;
+		const bulky = "kept body ".repeat(5000);
+		const raw: LiveContextMessage[] = [
+			{ role: "user", content: "task", timestamp: 1 },
+			{ role: "assistant", content: [{ type: "text", text: bulky }], timestamp: 2 },
+		];
+		await emit(harness, "context", { messages: raw });
+		await submit(path, (await readFile(path, "utf8")).replace("\ntask", "\ntask retained"));
+		await nextRequest(harness);
+		const entry = harness.branch.at(-1);
+		assert.equal(entry.data.lastOutcome.kind, "applied");
+		const stored = entry.data.checkpoint;
+		assert.equal(Object.hasOwn(stored, "projectedMessages"), false);
+		assert.equal(stored.projectedMessageStore.directory, `${sessionFile}.clm-checkpoints`);
+		assert.equal(stored.projectedMessageStore.refs.length, 2);
+		assert.ok(JSON.stringify(entry.data).length < bulky.length / 10, "the entry carries references, not bodies");
+		const stateCount = harness.branch.filter((item) => item.customType === "live-context-state").length;
+		await emit(harness, "session_shutdown", {});
+
+		for (const damaged of [false, true]) {
+			if (damaged) {
+				const file = join(stored.projectedMessageStore.directory, `${stored.projectedMessageStore.refs[1]}.json`);
+				await writeFile(file, (await readFile(file, "utf8")).replace("kept body", "altered body"));
+			}
+			const resumed = createHarness(structuredClone(harness.branch));
+			resumed.ctx.sessionManager.getSessionFile = () => sessionFile;
+			clmExtension(resumed.pi);
+			await emit(resumed, "session_start", {});
+			try {
+				const result = await emit(resumed, "context", { messages: raw });
+				const text = JSON.stringify(result[0].messages);
+				if (damaged) {
+					assert.doesNotMatch(text, /task retained/, "an unverifiable checkpoint is not applied");
+					assert.doesNotMatch(text, /altered body/);
+				} else {
+					assert.match(text, /task retained/);
+					assert.equal(text.split("kept body").length - 1, 5000);
+				}
+				assert.equal(resumed.branch.filter((item) => item.customType === "live-context-state").length, stateCount);
+			} finally { await emit(resumed, "session_shutdown", {}); }
+		}
+	} finally {
+		await emit(harness, "session_shutdown", {});
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
 
 for (const extraMetadata of [false, true]) for (const sourceMapping of ["mapped", "unmapped assistant", "unmapped result"] as const) for (const transform of ["edit", "cap", "overflow"] as const) {
 	test(`${sourceMapping}${extraMetadata ? " with extra envelope metadata" : ""}: signed complete text result ${transform} retains broad editing`, async () => {

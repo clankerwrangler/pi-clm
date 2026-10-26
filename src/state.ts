@@ -1,3 +1,9 @@
+import {
+	isStoredProjectedMessages,
+	readStoredMessages,
+	storeCheckpointMessages,
+	type StoredProjectionCheckpoint,
+} from "./checkpoint-store.ts";
 import type { ProjectionCheckpoint } from "./projection.ts";
 import type { ContextEditTrace, LiveContextMessage } from "./types.ts";
 
@@ -97,14 +103,19 @@ export function isProjectionCheckpoint(value: unknown): value is ProjectionCheck
 	);
 }
 
-export function isLiveContextState(value: unknown): value is LiveContextState {
+function isStoredProjectionCheckpoint(value: unknown): value is StoredProjectionCheckpoint {
 	if (!value || typeof value !== "object") return false;
-	const state = value as Partial<LiveContextState>;
+	const { projectedMessageStore, ...rest } = value as Partial<StoredProjectionCheckpoint>;
+	return isStoredProjectedMessages(projectedMessageStore) &&
+		!Object.hasOwn(rest, "projectedMessages") &&
+		isProjectionCheckpoint({ ...rest, projectedMessages: [] });
+}
+
+function hasStateFields(state: Partial<Omit<LiveContextState, "checkpoint">>): boolean {
 	return (
 		state.version === 1 &&
 		typeof state.enabled === "boolean" &&
 		Number.isInteger(state.revision) &&
-		(state.checkpoint === undefined || isProjectionCheckpoint(state.checkpoint)) &&
 		(state.event === undefined || (
 			Boolean(state.event) &&
 			(state.event.kind === "enabled" || state.event.kind === "disabled") &&
@@ -113,11 +124,58 @@ export function isLiveContextState(value: unknown): value is LiveContextState {
 	);
 }
 
+export function isLiveContextState(value: unknown): value is LiveContextState {
+	if (!value || typeof value !== "object") return false;
+	const state = value as Partial<LiveContextState>;
+	return hasStateFields(state) && (state.checkpoint === undefined || isProjectionCheckpoint(state.checkpoint));
+}
+
+/** A session entry's state, whose checkpoint bodies may still be in the checkpoint store. */
+export type PersistedLiveContextState = Omit<LiveContextState, "checkpoint"> & {
+	checkpoint?: ProjectionCheckpoint | StoredProjectionCheckpoint;
+};
+
+export function isPersistedLiveContextState(value: unknown): value is PersistedLiveContextState {
+	if (!value || typeof value !== "object") return false;
+	const state = value as Partial<PersistedLiveContextState>;
+	return hasStateFields(state) && (state.checkpoint === undefined ||
+		isProjectionCheckpoint(state.checkpoint) || isStoredProjectionCheckpoint(state.checkpoint));
+}
+
+/**
+ * Persist-safe copy whose checkpoint bodies live in the checkpoint store. Without a
+ * store directory, or when storage fails, the inline form is returned unchanged.
+ */
+export function toPersistedEntry(state: LiveContextState, directory: string | undefined): PersistedLiveContextState {
+	if (!state.checkpoint || !directory) return state;
+	try {
+		return { ...state, checkpoint: storeCheckpointMessages(state.checkpoint, directory) };
+	} catch {
+		return state;
+	}
+}
+
+/**
+ * Resolve an entry's state to its working form. A stored checkpoint whose bodies cannot
+ * be read and verified is dropped, so the projection fails closed to raw context.
+ */
+export function readLiveContextState(value: unknown): LiveContextState | undefined {
+	if (isLiveContextState(value)) return value;
+	if (!isPersistedLiveContextState(value)) return undefined;
+	const { checkpoint, ...rest } = value;
+	if (!checkpoint || !isStoredProjectionCheckpoint(checkpoint)) return rest;
+	const { projectedMessageStore, ...fields } = checkpoint;
+	const projectedMessages = readStoredMessages(projectedMessageStore);
+	return projectedMessages ? { ...rest, checkpoint: { ...fields, projectedMessages } } : rest;
+}
+
 export function reconstructLiveContextHistory(entries: SessionEntryLike[]): LiveContextState[] {
 	return entries
 		.filter((entry) => entry.type === "custom" && entry.customType === LIVE_CONTEXT_STATE)
-		.map((entry) => entry.data)
-		.filter(isLiveContextState);
+		.flatMap((entry) => {
+			const state = readLiveContextState(entry.data);
+			return state ? [state] : [];
+		});
 }
 
 /**
@@ -154,15 +212,17 @@ export function reconstructLiveContextStateNewestFirst(entries: Iterable<Session
 	let latest: LiveContextState | undefined;
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== LIVE_CONTEXT_STATE) continue;
-		if (!isLiveContextState(entry.data)) continue;
+		if (!isPersistedLiveContextState(entry.data)) continue;
 		if (!latest) {
-			latest = entry.data;
-			if (latest.checkpoint) return latest;
+			latest = readLiveContextState(entry.data)!;
+			if (latest.checkpoint || entry.data.checkpoint) return latest;
 			continue;
 		}
-		const checkpoint = entry.data.checkpoint;
-		if (!checkpoint) continue;
-		return checkpoint.revision === latest.revision ? { ...latest, checkpoint } : latest;
+		if (!entry.data.checkpoint) continue;
+		// Compare revisions before reading stored bodies for an inactive checkpoint.
+		if (entry.data.checkpoint.revision !== latest.revision) return latest;
+		const checkpoint = readLiveContextState(entry.data)!.checkpoint;
+		return checkpoint ? { ...latest, checkpoint } : latest;
 	}
 	return latest ?? initialLiveContextState();
 }

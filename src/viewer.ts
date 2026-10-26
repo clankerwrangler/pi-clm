@@ -33,7 +33,7 @@ import {
 import { selectContextVisibleMessages, selectProtectedMessageIndexes } from "./policy.ts";
 import { contextMode, formatCount } from "./presentation.ts";
 import { applyProjection, type ProjectionCheckpoint } from "./projection.ts";
-import { isLiveContextState, type LiveContextState, type SessionEntryLike } from "./state.ts";
+import { isPersistedLiveContextState, readLiveContextState, type LiveContextState, type SessionEntryLike } from "./state.ts";
 import {
 	buildContextTimeline,
 	formatMarkerRow,
@@ -270,11 +270,11 @@ interface CheckpointAnalysis {
 }
 
 function stateRecords(entries: SessionEntryLike[]): StateRecord[] {
-	return entries.flatMap((entry, entryIndex) =>
-		entry.type === "custom" && entry.customType === "live-context-state" && isLiveContextState(entry.data)
-			? [{ state: entry.data, entryIndex }]
-			: [],
-	);
+	return entries.flatMap((entry, entryIndex) => {
+		if (entry.type !== "custom" || entry.customType !== "live-context-state") return [];
+		const state = readLiveContextState(entry.data);
+		return state ? [{ state, entryIndex }] : [];
+	});
 }
 
 function isCompleteSessionEntry(entry: SessionEntryLike): entry is SessionEntryLike & SessionEntry {
@@ -629,7 +629,7 @@ interface ConversationTreeNode {
 
 function isConversationTreeEntry(entry: SessionEntry): boolean {
 	if (entry.type === "message") return (entry.message as unknown as LiveContextMessage).role === "user";
-	if (entry.type === "custom" && entry.customType === "live-context-state") return isLiveContextState(entry.data);
+	if (entry.type === "custom" && entry.customType === "live-context-state") return isPersistedLiveContextState(entry.data);
 	return entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "custom_message";
 }
 
@@ -810,12 +810,11 @@ function treeDisplay(
 			],
 		};
 	}
-	if (entry.type === "custom" && entry.customType === "live-context-state" && isLiveContextState(entry.data)) {
-		const persistedState = entry.data;
+	if (entry.type === "custom" && entry.customType === "live-context-state" && isPersistedLiveContextState(entry.data)) {
 		const current = entry.id === currentStateEntryId;
 		// Slim outcome entries omit the checkpoint payload. The current branch state has
 		// already reconstructed that checkpoint from the preceding acceptance entry.
-		const state = current ? currentLiveState : persistedState;
+		const state = current ? currentLiveState : readLiveContextState(entry.data)!;
 		const outcome = !state.enabled
 			? "disabled"
 			: state.event?.kind ?? state.lastOutcome?.kind ?? (state.checkpoint ? "checkpoint" : "enabled");
@@ -941,7 +940,7 @@ function treeRows(
 	cursor = options.leafId ?? null;
 	while (cursor) {
 		const entry = byId.get(cursor);
-		if (entry?.type === "custom" && entry.customType === "live-context-state" && isLiveContextState(entry.data)) {
+		if (entry?.type === "custom" && entry.customType === "live-context-state" && isPersistedLiveContextState(entry.data)) {
 			currentStateEntryId = entry.id;
 			break;
 		}

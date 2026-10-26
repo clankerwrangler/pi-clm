@@ -13,8 +13,8 @@
  * Rendering is pure text so it can be unit-tested and reused by the non-TUI report.
  */
 
-import type { LiveContextState, SessionEntryLike } from "./state.ts";
-import { isLiveContextState } from "./state.ts";
+import type { SessionEntryLike } from "./state.ts";
+import { isPersistedLiveContextState } from "./state.ts";
 
 export interface TimelinePoint {
 	/** 1-based request number on this branch. */
@@ -92,8 +92,8 @@ export function buildContextTimeline(entries: readonly SessionEntryLike[]): Cont
 			pendingTurn = false;
 			continue;
 		}
-		if (entry.type === "custom" && entry.customType === "live-context-state" && isLiveContextState(entry.data)) {
-			const state: LiveContextState = entry.data;
+		if (entry.type === "custom" && entry.customType === "live-context-state" && isPersistedLiveContextState(entry.data)) {
+			const state = entry.data;
 			revision = state.revision;
 			const outcome = state.lastOutcome;
 			// Slim entries (toggles, repeated persists) carry the same outcome again; record it once.
