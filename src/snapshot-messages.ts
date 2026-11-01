@@ -111,7 +111,7 @@ export class CapturedMessages {
 	prefix(count: number): Hash { return this.#prefixes[Math.max(count - this.#coldCount, 0)].copy(); }
 	get visibleTokens(): number { return this.items.reduce((total, item) => total + (item.profile.visible ? item.profile.tokens : 0), 0); }
 	observed(): { tokens: number; index: number } | undefined {
-		for (let index = this.length - 1; index >= 0; index--) {
+		for (let index = this.items.length - 1; index >= 0; index--) {
 			const tokens = this.items[index].profile.observedTokens;
 			if (tokens !== undefined) return { tokens, index: index + this.#coldCount };
 		}

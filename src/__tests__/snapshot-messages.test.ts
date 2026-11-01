@@ -313,6 +313,7 @@ test("a source with a cold prefix holds only what follows it, at unchanged posit
 		assert.equal(captured.sourceEntryIdAt(99), "bookmark");
 		assert.equal(captured.sourceEntryIdAt(101), "after-b");
 		assert.deepEqual(captured.slice(100), [message("held 100"), message("held 101")]);
+		assert.equal(captured.observed(), undefined, "reading usage stays inside held messages");
 		assert.deepEqual(coldReads, [], "reading from the bookmark onward never touches the prefix");
 		assert.deepEqual(captured.slice(99, 101), [message("cold 99"), message("held 100")]);
 		assert.deepEqual(coldReads, [[99, 100]]);
