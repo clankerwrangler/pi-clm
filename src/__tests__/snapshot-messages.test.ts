@@ -214,7 +214,7 @@ test("historical checkpoint payloads remain exact file-backed owners across draf
 			projectedMessages: [{ ...message("old projected body"), additional: undefined }], beforeEstimate: 20, afterEstimate: 10 });
 		const expected = structuredClone(checkpoint);
 		const captured = pool.captureCheckpoint(checkpoint, store);
-		assert.deepEqual(Object.keys(captured.frame).sort(), ["revision", "sourceDigest", "sourceMessageCount"]);
+		assert.deepEqual(Object.keys(captured.frame).sort(), ["revision", "sourceDigest", "sourceEntryId", "sourceMessageCount"]);
 		assert.ok(captured.value.file);
 		checkpoint.projectedMessages[0].content = "mutated newer working value";
 		pool.retainCaptured([captured]);
@@ -304,9 +304,10 @@ test("a source with a cold prefix holds only what follows it, at unchanged posit
 			coldReads.push([start, end]);
 			return Array.from({ length: end - start }, (_, index) => message(`cold ${start + index}`));
 		} };
-		const source = { length: 102, cold, contributions: [{ key: "a", sourceEntryId: "after-a" }, { key: "b", sourceEntryId: "after-b" }],
-			read: (index: number) => message(`held ${index}`), validate() {} };
-		const captured = new SnapshotMessages().captureSource(source, store, () => ({ tokens: 1, visible: true }));
+		const contributions = [...Array.from({ length: 100 }, (_, index) => ({ key: `cold-${index}` })),
+			{ key: "a", sourceEntryId: "after-a" }, { key: "b", sourceEntryId: "after-b" }];
+		const source = { length: 102, contributions, read: (index: number) => message(`held ${index}`), validate() {} };
+		const captured = new SnapshotMessages().captureSource(source, store, () => ({ tokens: 1, visible: true }), undefined, cold);
 		assert.equal(captured.length, 102);
 		assert.equal(captured.items.length, 2);
 		assert.equal(captured.sourceEntryIdAt(99), "bookmark");

@@ -11,9 +11,7 @@ import type { ContextDocumentSnapshot, LiveContextMessage } from "./types.ts";
 /** Structural counterpart of the opt-in SDK source; no legacy SDK type dependency. */
 export interface SnapshotMessageSource {
 	readonly length: number;
-	/** Messages from `cold.count` onward. Positions, including `read`, stay absolute. */
 	readonly contributions: readonly { readonly key: string; readonly sourceEntryId?: string }[];
-	readonly cold?: ColdPrefix;
 	read(index: number): unknown;
 	validate(): void;
 }
@@ -144,9 +142,9 @@ export class CapturedDocument {
 
 /** Cold derived checkpoint values keep the persisted format and exact recovery result. */
 export class CapturedCheckpoint {
-	readonly frame: Pick<ProjectionCheckpoint, "revision" | "sourceMessageCount" | "sourceDigest">;
+	readonly frame: Pick<ProjectionCheckpoint, "revision" | "sourceMessageCount" | "sourceDigest" | "sourceEntryId">;
 	constructor(readonly value: CapturedValue<ProjectionCheckpoint>, checkpoint: ProjectionCheckpoint) {
-		this.frame = { revision: checkpoint.revision, sourceMessageCount: checkpoint.sourceMessageCount, sourceDigest: checkpoint.sourceDigest };
+		this.frame = { revision: checkpoint.revision, sourceMessageCount: checkpoint.sourceMessageCount, sourceDigest: checkpoint.sourceDigest, sourceEntryId: checkpoint.sourceEntryId };
 	}
 	read(): ProjectionCheckpoint { return this.value.read(); }
 }
@@ -165,16 +163,16 @@ export class SnapshotMessages {
 	}
 
 	/** Capture before yielding/publishing. Never retain a borrowed plan in the result. */
-	captureSource(source: SnapshotMessageSource, store: MirrorStore, profile: (message: LiveContextMessage) => MessageProfile, previous = this.previous): CapturedMessages {
+	captureSource(source: SnapshotMessageSource, store: MirrorStore, profile: (message: LiveContextMessage) => MessageProfile, previous = this.previous, cold?: ColdPrefix): CapturedMessages {
 		source.validate();
-		const firstHeld = source.cold?.count ?? 0;
-		if (source.length !== firstHeld + source.contributions.length) throw new Error("Invalid source extent.");
+		const firstHeld = cold?.count ?? 0;
+		if (source.length !== source.contributions.length) throw new Error("Invalid source extent.");
 		const before = new Set(this.capturedValues);
 		const added = new Set<string>();
 		try {
 			const captured = CapturedMessages.capture((function* (pool: SnapshotMessages) {
 				for (let index = firstHeld; index < source.length; index++) {
-					const contribution = source.contributions[index - firstHeld], key = contribution.key;
+					const contribution = source.contributions[index], key = contribution.key;
 					let item = pool.sourceValues.get(key);
 					let message: LiveContextMessage | undefined;
 					if (!item || item.value.store !== store) {
@@ -186,7 +184,7 @@ export class SnapshotMessages {
 					}
 					yield { item, message };
 				}
-			})(this), previous, source.cold);
+			})(this), previous, cold);
 			source.validate();
 			for (const item of captured.items) if (added.has(item.key)) {
 				const digest = item.digest;

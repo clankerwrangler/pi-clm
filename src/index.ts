@@ -15,7 +15,7 @@ import {
 import { Type } from "typebox";
 
 import { applyContextDocument, digestMessages } from "./context-document.ts";
-import { CapturedCheckpoint, CapturedDocument, CapturedMessages, CapturedValue, SnapshotMessages, type SnapshotMessageSource, type MessageProfile } from "./snapshot-messages.ts";
+import { CapturedCheckpoint, CapturedDocument, CapturedMessages, CapturedValue, SnapshotMessages, type ColdPrefix, type SnapshotMessageSource, type MessageProfile } from "./snapshot-messages.ts";
 import {
 	CONTINUITY_SIZE_WARNING_TOKENS,
 	DEFAULT_RECALL_TOKENS,
@@ -1551,6 +1551,15 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	// Register structural source counterparts without requiring the newer SDK in legacy installations.
 	const sourceAPI = pi as unknown as { on(name: "context_source" | "agent_end_source",
 		handler: (event: { source: SnapshotMessageSource }, ctx: ExtensionContext) => unknown): void };
+	/** Everything up to the active checkpoint's bookmark stays on disk. */
+	function coldPrefix(source: SnapshotMessageSource, ctx: ExtensionContext): ColdPrefix | undefined {
+		if (!state.checkpoint) return undefined;
+		const { sourceEntryId: entryId, sourceMessageCount: count } = checkpointFrame(state.checkpoint);
+		if (!entryId || count < 1 || source.contributions[count - 1]?.sourceEntryId !== entryId) return undefined;
+		const manager = ctx.sessionManager;
+		return { count, entryId, read: (start, end) => asLiveMessages(
+			buildSessionContext(manager.getEntries(), manager.getLeafId()).messages).slice(start, end) };
+	}
 	function sourceOperation(initial: SnapshotMessageSource, ctx: ExtensionContext, final: boolean): () => Promise<unknown> {
 		let source: SnapshotMessageSource | undefined = initial;
 		return async () => {
@@ -1562,7 +1571,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				if (final && (!publishedBaseline || active.length < publishedBaseline.rawMessages.length ||
 					(publishedBaseline.rawMessages.length > 0 && active.contributions[0] && "role" in active.contributions[0] && active.contributions[0].role === "system" &&
 					 publishedBaseline.rawMessages instanceof CapturedMessages && publishedBaseline.rawMessages.items[0]?.profile.role !== "system"))) return;
-				raw = store ? snapshots.captureSource(active, store, snapshotProfile, final ? finalRawCapture : currentRawCapture)
+				raw = store ? snapshots.captureSource(active, store, snapshotProfile, final ? finalRawCapture : currentRawCapture, coldPrefix(active, ctx))
 					: Array.from({ length: active.length }, (_, index) => active.read(index) as LiveContextMessage);
 			} finally { source = undefined; } // A pending SDK descriptor may own its sole unflushed payload.
 			if (final) {
