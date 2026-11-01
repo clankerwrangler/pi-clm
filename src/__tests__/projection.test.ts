@@ -78,6 +78,33 @@ describe("projection rebasing", () => {
 		assert.equal(created.sourceDigest, digestMessages(raw));
 	});
 
+	test("an entry bookmark decides the prefix without reading its messages", () => {
+		const source = (ids: string[]) => ({
+			length: ids.length,
+			sourceEntryIdAt: (index: number) => ids[index],
+			digest() { throw new Error("the prefix digest must not be needed"); },
+			slice: (start: number, end = ids.length) => ids.slice(start, end).map((id) => ({ role: "user", content: id, timestamp: 1 })),
+		});
+		const created = { ...checkpoint(), sourceMessageCount: 2, sourceEntryId: "b" };
+		assert.equal(applyProjection(source(["a", "b", "c"]), created).valid, true);
+		assert.equal(applyProjection(source(["a", "x", "c"]), created).valid, false);
+	});
+
+	test("a checkpoint or source without a bookmark still compares the digest", () => {
+		const created = checkpoint();
+		assert.equal(created.sourceEntryId, undefined);
+		assert.equal(applyProjection(raw, created).valid, true);
+		assert.equal(applyProjection(raw, { ...created, sourceEntryId: "b" }).valid, true);
+	});
+
+	test("checkpoints record the entry behind their last source message", () => {
+		const created = createProjectionCheckpoint({
+			revision: 1, projectedMessages: [], beforeEstimate: 1, afterEstimate: 1,
+			sourceMessages: { length: 2, sourceEntryIdAt: (index: number) => ["a", "b"][index], digest: () => "0".repeat(64), slice: () => [] },
+		});
+		assert.equal(created.sourceEntryId, "b");
+	});
+
 	test("canonical message digests ignore object key order", () => {
 		const left = [{ role: "user", content: "x", timestamp: 1 }];
 		const right = [{ timestamp: 1, content: "x", role: "user" }];

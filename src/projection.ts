@@ -4,12 +4,25 @@ import type { ContextEditTrace, LiveContextMessage } from "./types.ts";
 /** A captured prefix supplies exact hashes and owned full-value range reads. */
 export type ProjectionSource = LiveContextMessage[] | {
 	readonly length: number;
+	sourceEntryIdAt?(index: number): string | undefined;
 	digest(count?: number): string;
 	slice(start: number, end?: number): LiveContextMessage[];
 };
 
 export function projectionDigest(messages: ProjectionSource, count = messages.length): string {
 	return Array.isArray(messages) ? digestMessages(messages.slice(0, count)) : messages.digest(count);
+}
+
+function sourceEntryIdAt(messages: ProjectionSource, index: number): string | undefined {
+	return Array.isArray(messages) ? undefined : messages.sourceEntryIdAt?.(index);
+}
+
+/** The prefix matches when its last message still comes from the recorded entry. */
+function prefixMatches(messages: ProjectionSource, checkpoint: ProjectionCheckpoint): boolean {
+	const entryId = sourceEntryIdAt(messages, checkpoint.sourceMessageCount - 1);
+	return entryId !== undefined && checkpoint.sourceEntryId !== undefined
+		? entryId === checkpoint.sourceEntryId
+		: projectionDigest(messages, checkpoint.sourceMessageCount) === checkpoint.sourceDigest;
 }
 
 export const PROJECTION_PREFIX_MISMATCH_REASON =
@@ -20,6 +33,8 @@ export interface ProjectionCheckpoint {
 	revision: number;
 	sourceMessageCount: number;
 	sourceDigest: string;
+	/** The session entry behind the last source message. Older checkpoints omit it. */
+	sourceEntryId?: string;
 	projectedMessages: LiveContextMessage[];
 	beforeEstimate: number;
 	afterEstimate: number;
@@ -76,6 +91,7 @@ export function createProjectionCheckpoint(options: {
 		revision: options.revision,
 		sourceMessageCount: options.sourceMessages.length,
 		sourceDigest: projectionDigest(options.sourceMessages),
+		sourceEntryId: sourceEntryIdAt(options.sourceMessages, options.sourceMessages.length - 1),
 		projectedMessages: [...options.projectedMessages],
 		beforeEstimate: options.beforeEstimate,
 		afterEstimate: options.afterEstimate,
@@ -111,7 +127,7 @@ export function applyProjection(
 		};
 	}
 
-	if (projectionDigest(rawMessages, checkpoint.sourceMessageCount) !== checkpoint.sourceDigest) {
+	if (!prefixMatches(rawMessages, checkpoint)) {
 		return {
 			valid: false,
 			messages: rawMessages.slice(0),

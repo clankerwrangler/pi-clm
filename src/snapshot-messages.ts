@@ -11,7 +11,7 @@ import type { ContextDocumentSnapshot, LiveContextMessage } from "./types.ts";
 /** Structural counterpart of the opt-in SDK source; no legacy SDK type dependency. */
 export interface SnapshotMessageSource {
 	readonly length: number;
-	readonly contributions: readonly { readonly key: string }[];
+	readonly contributions: readonly { readonly key: string; readonly sourceEntryId?: string }[];
 	read(index: number): unknown;
 	validate(): void;
 }
@@ -46,6 +46,7 @@ export class CapturedValue<T> {
 
 interface CapturedMessage {
 	key: string;
+	sourceEntryId?: string;
 	digest: string;
 	value: CapturedValue<LiveContextMessage>;
 	profile: MessageProfile;
@@ -73,6 +74,7 @@ export class CapturedMessages {
 		return new CapturedMessages(items, prefixes);
 	}
 	get length(): number { return this.items.length; }
+	sourceEntryIdAt(index: number): string | undefined { return this.items[index]?.sourceEntryId; }
 	read(index: number): LiveContextMessage {
 		const item = this.items[index];
 		if (!item) throw new RangeError("Captured message index is out of range.");
@@ -156,7 +158,7 @@ export class SnapshotMessages {
 						message = source.read(index) as LiveContextMessage;
 						const digest = digestMessages([message]);
 						const equal = pool.valueBuckets.get(digest)?.find(candidate => candidate.value.store === store && isDeepStrictEqual(candidate.value.read(), message));
-						item = { key, digest, value: equal?.value ?? pool.own(store, message), profile: equal?.profile ?? profile(message), bodies: equal?.bodies ?? {} };
+						item = { key, sourceEntryId: source.contributions[index].sourceEntryId, digest, value: equal?.value ?? pool.own(store, message), profile: equal?.profile ?? profile(message), bodies: equal?.bodies ?? {} };
 						pool.sourceValues.set(key, item); added.add(key);
 					}
 					yield { item, message };

@@ -284,3 +284,14 @@ test("unchanged private prefix states share across 16 owners; public copies and 
 		assert.deepEqual(await snapshotFiles(store.directory), []);
 	} finally { Hash.prototype.copy = originalCopy; await store.cleanup(); }
 });
+
+test("captured messages keep the entry behind each source message", async () => {
+	const store = await MirrorStore.create("source-entry-id-test");
+	try {
+		const pool = new SnapshotMessages();
+		const captured = pool.captureSource({ length: 2, contributions: [{ key: "a", sourceEntryId: "entry-a" }, { key: "b" }],
+			read: (index: number) => message(`value ${index}`), validate() {} }, store, () => ({ tokens: 1, visible: true }));
+		assert.equal(captured.sourceEntryIdAt(0), "entry-a");
+		assert.equal(captured.sourceEntryIdAt(1), undefined);
+	} finally { await store.cleanup(); }
+});
