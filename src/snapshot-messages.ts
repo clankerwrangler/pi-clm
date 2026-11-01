@@ -87,6 +87,7 @@ export class CapturedMessages {
 		return new CapturedMessages(items, prefixes, cold);
 	}
 	get length(): number { return this.#coldCount + this.items.length; }
+	get partialDigest(): boolean { return this.#coldCount > 0; }
 	sourceEntryIdAt(index: number): string | undefined {
 		return this.#cold && index === this.#cold.count - 1 ? this.#cold.entryId : this.items[index - this.#coldCount]?.sourceEntryId;
 	}

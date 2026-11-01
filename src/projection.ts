@@ -5,6 +5,7 @@ import type { ContextEditTrace, LiveContextMessage } from "./types.ts";
 export type ProjectionSource = LiveContextMessage[] | {
 	readonly length: number;
 	sourceEntryIdAt?(index: number): string | undefined;
+	readonly partialDigest?: boolean;
 	digest(count?: number): string;
 	slice(start: number, end?: number): LiveContextMessage[];
 };
@@ -20,9 +21,10 @@ function sourceEntryIdAt(messages: ProjectionSource, index: number): string | un
 /** The prefix matches when its last message still comes from the recorded entry. */
 function prefixMatches(messages: ProjectionSource, checkpoint: ProjectionCheckpoint): boolean {
 	const entryId = sourceEntryIdAt(messages, checkpoint.sourceMessageCount - 1);
-	return entryId !== undefined && checkpoint.sourceEntryId !== undefined
-		? entryId === checkpoint.sourceEntryId
-		: projectionDigest(messages, checkpoint.sourceMessageCount) === checkpoint.sourceDigest;
+	if (entryId !== undefined && checkpoint.sourceEntryId !== undefined) return entryId === checkpoint.sourceEntryId;
+	// A plain message array has no ids to compare, and a partial digest can't describe it.
+	return checkpoint.sourceDigestPartial === true
+		|| projectionDigest(messages, checkpoint.sourceMessageCount) === checkpoint.sourceDigest;
 }
 
 /** Whether two sources share their first `count` messages. */
@@ -43,6 +45,8 @@ export interface ProjectionCheckpoint {
 	sourceDigest: string;
 	/** The session entry behind the last source message. Older checkpoints omit it. */
 	sourceEntryId?: string;
+	/** sourceDigest covers only messages after an earlier bookmark, so no full source can match it. */
+	sourceDigestPartial?: boolean;
 	projectedMessages: LiveContextMessage[];
 	beforeEstimate: number;
 	afterEstimate: number;
@@ -100,6 +104,7 @@ export function createProjectionCheckpoint(options: {
 		sourceMessageCount: options.sourceMessages.length,
 		sourceDigest: projectionDigest(options.sourceMessages),
 		sourceEntryId: sourceEntryIdAt(options.sourceMessages, options.sourceMessages.length - 1),
+		...(!Array.isArray(options.sourceMessages) && options.sourceMessages.partialDigest ? { sourceDigestPartial: true } : {}),
 		projectedMessages: [...options.projectedMessages],
 		beforeEstimate: options.beforeEstimate,
 		afterEstimate: options.afterEstimate,

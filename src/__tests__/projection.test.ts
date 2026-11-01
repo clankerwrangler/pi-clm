@@ -97,6 +97,12 @@ describe("projection rebasing", () => {
 		assert.equal(applyProjection(raw, { ...created, sourceEntryId: "b" }).valid, true);
 	});
 
+	test("a partial digest is accepted on plain arrays, and only then", () => {
+		const created = checkpoint();
+		assert.equal(applyProjection(raw, { ...created, sourceDigest: "0".repeat(64), sourceEntryId: "b", sourceDigestPartial: true }).valid, true);
+		assert.equal(applyProjection(raw, { ...created, sourceDigest: "0".repeat(64), sourceEntryId: "b" }).valid, false);
+	});
+
 	test("checkpoints record the entry behind their last source message", () => {
 		const created = createProjectionCheckpoint({
 			revision: 1, projectedMessages: [], beforeEstimate: 1, afterEstimate: 1,

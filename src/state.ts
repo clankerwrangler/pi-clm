@@ -95,6 +95,7 @@ export function isProjectionCheckpoint(value: unknown): value is ProjectionCheck
 		typeof checkpoint.sourceDigest === "string" &&
 		/^[a-f0-9]{64}$/.test(checkpoint.sourceDigest) &&
 		(checkpoint.sourceEntryId === undefined || typeof checkpoint.sourceEntryId === "string") &&
+		(checkpoint.sourceDigestPartial === undefined || typeof checkpoint.sourceDigestPartial === "boolean") &&
 		isMessageArray(checkpoint.projectedMessages) &&
 		typeof checkpoint.beforeEstimate === "number" &&
 		typeof checkpoint.afterEstimate === "number" &&
