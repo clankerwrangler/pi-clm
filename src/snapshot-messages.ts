@@ -11,9 +11,18 @@ import type { ContextDocumentSnapshot, LiveContextMessage } from "./types.ts";
 /** Structural counterpart of the opt-in SDK source; no legacy SDK type dependency. */
 export interface SnapshotMessageSource {
 	readonly length: number;
+	/** Messages from `cold.count` onward. Positions, including `read`, stay absolute. */
 	readonly contributions: readonly { readonly key: string; readonly sourceEntryId?: string }[];
+	readonly cold?: ColdPrefix;
 	read(index: number): unknown;
 	validate(): void;
+}
+
+/** Messages before a bookmark, held on disk and read only if something asks for them. */
+export interface ColdPrefix {
+	readonly count: number;
+	readonly entryId: string;
+	read(start: number, end: number): LiveContextMessage[];
 }
 
 export interface MessageProfile {
@@ -56,11 +65,17 @@ interface CapturedMessage {
 /** Owned values, not a borrowed SDK plan or a lazy array. */
 export class CapturedMessages {
 	readonly #prefixes: readonly Hash[];
-	private constructor(readonly items: readonly CapturedMessage[], prefixes: readonly Hash[]) { this.#prefixes = prefixes; }
+	readonly #cold?: ColdPrefix;
+	private constructor(readonly items: readonly CapturedMessage[], prefixes: readonly Hash[], cold?: ColdPrefix) {
+		this.#prefixes = prefixes;
+		this.#cold = cold;
+	}
+	get #coldCount(): number { return this.#cold?.count ?? 0; }
 
 	/** Consume one value at a time. Stored hash states are private and never
 	 * updated; only copies cross a mutable boundary or extend a changed prefix. */
-	static capture(records: Iterable<{ item: CapturedMessage; message?: LiveContextMessage }>, previous?: CapturedMessages): CapturedMessages {
+	static capture(records: Iterable<{ item: CapturedMessage; message?: LiveContextMessage }>, previous?: CapturedMessages, cold?: ColdPrefix): CapturedMessages {
+		if (previous && previous.#coldCount !== (cold?.count ?? 0)) previous = undefined;
 		const items: CapturedMessage[] = [];
 		const prefixes: Hash[] = [previous ? previous.#prefixes[0] : createHash("sha256")];
 		let unchanged = true;
@@ -71,29 +86,36 @@ export class CapturedMessages {
 			prefixes.push(unchanged ? previous!.#prefixes[index + 1] :
 				prefixes[index].copy().update(canonicalMessage(message ?? item.value.read())).update("\n"));
 		}
-		return new CapturedMessages(items, prefixes);
+		return new CapturedMessages(items, prefixes, cold);
 	}
-	get length(): number { return this.items.length; }
-	sourceEntryIdAt(index: number): string | undefined { return this.items[index]?.sourceEntryId; }
+	get length(): number { return this.#coldCount + this.items.length; }
+	sourceEntryIdAt(index: number): string | undefined {
+		return this.#cold && index === this.#cold.count - 1 ? this.#cold.entryId : this.items[index - this.#coldCount]?.sourceEntryId;
+	}
 	read(index: number): LiveContextMessage {
-		const item = this.items[index];
+		if (index >= 0 && index < this.#coldCount) return this.#cold!.read(index, index + 1)[0];
+		const item = this.items[index - this.#coldCount];
 		if (!item) throw new RangeError("Captured message index is out of range.");
 		return item.value.read();
 	}
-	readAll(): LiveContextMessage[] { return this.items.map((_, index) => this.read(index)); }
+	readAll(): LiveContextMessage[] { return this.slice(0); }
 	slice(start: number, end = this.length): LiveContextMessage[] {
-		return this.items.slice(start, end).map(item => item.value.read());
+		const cold = this.#coldCount;
+		return [
+			...(start < cold ? this.#cold!.read(start, Math.min(end, cold)) : []),
+			...this.items.slice(Math.max(start - cold, 0), Math.max(end - cold, 0)).map(item => item.value.read()),
+		];
 	}
 	digest(count = this.length): string {
 		if (!Number.isSafeInteger(count) || count < 0 || count > this.length) throw new RangeError("Invalid captured prefix.");
-		return this.#prefixes[count].copy().digest("hex");
+		return this.#prefixes[Math.max(count - this.#coldCount, 0)].copy().digest("hex");
 	}
-	prefix(count: number): Hash { return this.#prefixes[count].copy(); }
+	prefix(count: number): Hash { return this.#prefixes[Math.max(count - this.#coldCount, 0)].copy(); }
 	get visibleTokens(): number { return this.items.reduce((total, item) => total + (item.profile.visible ? item.profile.tokens : 0), 0); }
 	observed(): { tokens: number; index: number } | undefined {
 		for (let index = this.length - 1; index >= 0; index--) {
 			const tokens = this.items[index].profile.observedTokens;
-			if (tokens !== undefined) return { tokens, index };
+			if (tokens !== undefined) return { tokens, index: index + this.#coldCount };
 		}
 		return undefined;
 	}
@@ -145,25 +167,26 @@ export class SnapshotMessages {
 	/** Capture before yielding/publishing. Never retain a borrowed plan in the result. */
 	captureSource(source: SnapshotMessageSource, store: MirrorStore, profile: (message: LiveContextMessage) => MessageProfile, previous = this.previous): CapturedMessages {
 		source.validate();
-		if (source.length !== source.contributions.length) throw new Error("Invalid source extent.");
+		const firstHeld = source.cold?.count ?? 0;
+		if (source.length !== firstHeld + source.contributions.length) throw new Error("Invalid source extent.");
 		const before = new Set(this.capturedValues);
 		const added = new Set<string>();
 		try {
 			const captured = CapturedMessages.capture((function* (pool: SnapshotMessages) {
-				for (let index = 0; index < source.length; index++) {
-					const key = source.contributions[index].key;
+				for (let index = firstHeld; index < source.length; index++) {
+					const contribution = source.contributions[index - firstHeld], key = contribution.key;
 					let item = pool.sourceValues.get(key);
 					let message: LiveContextMessage | undefined;
 					if (!item || item.value.store !== store) {
 						message = source.read(index) as LiveContextMessage;
 						const digest = digestMessages([message]);
 						const equal = pool.valueBuckets.get(digest)?.find(candidate => candidate.value.store === store && isDeepStrictEqual(candidate.value.read(), message));
-						item = { key, sourceEntryId: source.contributions[index].sourceEntryId, digest, value: equal?.value ?? pool.own(store, message), profile: equal?.profile ?? profile(message), bodies: equal?.bodies ?? {} };
+						item = { key, sourceEntryId: contribution.sourceEntryId, digest, value: equal?.value ?? pool.own(store, message), profile: equal?.profile ?? profile(message), bodies: equal?.bodies ?? {} };
 						pool.sourceValues.set(key, item); added.add(key);
 					}
 					yield { item, message };
 				}
-			})(this), previous);
+			})(this), previous, source.cold);
 			source.validate();
 			for (const item of captured.items) if (added.has(item.key)) {
 				const digest = item.digest;

@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import { renderContextDocument } from "../context-document.ts";
 import { MirrorStore } from "../mirror-store.ts";
-import { createProjectionCheckpoint } from "../projection.ts";
+import { applyProjection, createProjectionCheckpoint } from "../projection.ts";
 import { digestMessages } from "../context-document.ts";
 import { readdir } from "node:fs/promises";
 
@@ -293,5 +293,35 @@ test("captured messages keep the entry behind each source message", async () => 
 			read: (index: number) => message(`value ${index}`), validate() {} }, store, () => ({ tokens: 1, visible: true }));
 		assert.equal(captured.sourceEntryIdAt(0), "entry-a");
 		assert.equal(captured.sourceEntryIdAt(1), undefined);
+	} finally { await store.cleanup(); }
+});
+
+test("a source with a cold prefix holds only what follows it, at unchanged positions", async () => {
+	const store = await MirrorStore.create("source-cold-prefix-test");
+	try {
+		const coldReads: Array<[number, number]> = [];
+		const cold = { count: 100, entryId: "bookmark", read(start: number, end: number) {
+			coldReads.push([start, end]);
+			return Array.from({ length: end - start }, (_, index) => message(`cold ${start + index}`));
+		} };
+		const source = { length: 102, cold, contributions: [{ key: "a", sourceEntryId: "after-a" }, { key: "b", sourceEntryId: "after-b" }],
+			read: (index: number) => message(`held ${index}`), validate() {} };
+		const captured = new SnapshotMessages().captureSource(source, store, () => ({ tokens: 1, visible: true }));
+		assert.equal(captured.length, 102);
+		assert.equal(captured.items.length, 2);
+		assert.equal(captured.sourceEntryIdAt(99), "bookmark");
+		assert.equal(captured.sourceEntryIdAt(101), "after-b");
+		assert.deepEqual(captured.slice(100), [message("held 100"), message("held 101")]);
+		assert.deepEqual(coldReads, [], "reading from the bookmark onward never touches the prefix");
+		assert.deepEqual(captured.slice(99, 101), [message("cold 99"), message("held 100")]);
+		assert.deepEqual(coldReads, [[99, 100]]);
+		const checkpoint = { ...createProjectionCheckpoint({ revision: 1, sourceMessages: [], projectedMessages: [message("summary")],
+			beforeEstimate: 1, afterEstimate: 1 }), sourceMessageCount: 100, sourceEntryId: "bookmark" };
+		coldReads.length = 0;
+		const applied = applyProjection(captured, checkpoint);
+		assert.equal(applied.valid, true);
+		assert.deepEqual(applied.messages, [message("summary"), message("held 100"), message("held 101")]);
+		assert.deepEqual(coldReads, [], "applying a checkpoint at the bookmark never touches the prefix");
+		assert.equal(applyProjection(captured, { ...checkpoint, sourceEntryId: "elsewhere" }).valid, false);
 	} finally { await store.cleanup(); }
 });

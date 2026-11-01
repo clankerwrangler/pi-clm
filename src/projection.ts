@@ -25,6 +25,14 @@ function prefixMatches(messages: ProjectionSource, checkpoint: ProjectionCheckpo
 		: projectionDigest(messages, checkpoint.sourceMessageCount) === checkpoint.sourceDigest;
 }
 
+/** Whether two sources share their first `count` messages. */
+export function samePrefix(left: ProjectionSource, right: ProjectionSource, count: number): boolean {
+	const leftId = sourceEntryIdAt(left, count - 1), rightId = sourceEntryIdAt(right, count - 1);
+	return leftId !== undefined && rightId !== undefined
+		? leftId === rightId
+		: projectionDigest(left, count) === projectionDigest(right, count);
+}
+
 export const PROJECTION_PREFIX_MISMATCH_REASON =
 	"Raw context prefix no longer matches the projection checkpoint.";
 

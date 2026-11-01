@@ -72,6 +72,7 @@ import {
 } from "./presentation.ts";
 import {
 	applyProjection,
+	samePrefix,
 	projectionDigest,
 	createProjectionCheckpoint,
 	PROJECTION_PREFIX_MISMATCH_REASON,
@@ -1542,7 +1543,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	async function finishContext(rawMessages: RawMessages, ctx: ExtensionContext): Promise<void> {
 		// Final events certify canonical source space, not a preceding transform.
 		if (!publishedBaseline || !mirrorAvailable(rawMessages) || rawMessages.length < publishedBaseline.rawMessages.length ||
-			projectionDigest(rawMessages, publishedBaseline.rawMessages.length) !== projectionDigest(publishedBaseline.rawMessages)) return;
+			!samePrefix(rawMessages, publishedBaseline.rawMessages, publishedBaseline.rawMessages.length)) return;
 		await acceptSubmission(rawMessages, ctx);
 	}
 	pi.on("agent_end", (event, ctx) => serializeContext(() => finishContext(asLiveMessages(event.messages), ctx)));
@@ -1963,7 +1964,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		baseline = id ? drafts.get(id) : baseline;
 		if (!baseline || snapshotFrame(baseline).revision !== state.revision || baseline.model !== modelIdentity(ctx) ||
 			rawMessages.length < baseline.rawMessages.length ||
-			projectionDigest(rawMessages, baseline.rawMessages.length) !== projectionDigest(baseline.rawMessages)) {
+			!samePrefix(rawMessages, baseline.rawMessages, baseline.rawMessages.length)) {
 			queueOutcomeNotice("Edit rejected: expired or conflicting snapshot. Read the current mirror and submit a new draft.");
 			return;
 		}
