@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { compactionSource } from "./compaction-source.ts";
 import { applyContextDocument, digestMessages } from "./context-document.ts";
 import { CapturedCheckpoint, CapturedDocument, CapturedMessages, CapturedValue, SnapshotMessages, type ColdPrefix, type SnapshotMessageSource, type MessageProfile } from "./snapshot-messages.ts";
 import {
@@ -1550,7 +1551,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	// Register structural source counterparts without requiring the newer SDK in legacy installations.
 	const sourceAPI = pi as unknown as { on(name: "context_source" | "agent_end_source",
-		handler: (event: { source: SnapshotMessageSource }, ctx: ExtensionContext) => unknown): void };
+		handler: (event: { source: SnapshotMessageSource; purpose?: "compaction" }, ctx: ExtensionContext) => unknown): void };
 	/** Everything up to the active checkpoint's bookmark stays on disk. */
 	function coldPrefix(source: SnapshotMessageSource, ctx: ExtensionContext): ColdPrefix | undefined {
 		if (!state.checkpoint) return undefined;
@@ -1592,7 +1593,16 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			}) };
 		};
 	}
-	sourceAPI.on("context_source", (event, ctx) => serializeContext(sourceOperation(event.source, ctx, false)));
+	sourceAPI.on("context_source", (event, ctx) => {
+		if (event.purpose !== "compaction") return serializeContext(sourceOperation(event.source, ctx, false));
+		return serializeContext(async () => {
+			if (!state.enabled || !state.checkpoint) return undefined;
+			const revision = state.revision, epoch = lifecycleEpoch, accepted = state.checkpoint;
+			return { source: compactionSource(event.source, readCheckpoint(accepted), observationCap, () => {
+				if (!state.enabled || state.checkpoint !== accepted || state.revision !== revision || lifecycleEpoch !== epoch) throw new Error("Accepted compaction view expired");
+			}) };
+		});
+	});
 	sourceAPI.on("agent_end_source", (event, ctx) => serializeContext(sourceOperation(event.source, ctx, true)));
 	pi.on("model_select", () => {
 		lifecycleEpoch++;

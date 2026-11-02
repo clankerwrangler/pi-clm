@@ -174,8 +174,16 @@ not remove raw history or authorize replay, credential changes, or policy change
 Checkpoints bind the edited prefix to a digest of the original raw prefix. If that prefix
 changes, the extension does not apply it blindly. Branch state is reconstructed from
 custom entries on the active branch; reset disables the current projection without
-deleting raw history. Pi's native compaction summarizes the raw transcript and resets the
-projection. Existing retry-signature handling remains in `projection.ts`.
+deleting raw history. Pi's native compaction resets the projection. Source-aware hosts can prepare it from
+CLM's accepted view through `context_source` with `purpose: "compaction"`. This read
+uses the existing accepted checkpoint and canonical suffix, without accepting pending
+mirror submissions, consuming notices, publishing the mirror, or advancing turn state.
+Only exact unchanged suffix values retain their genuine contribution descriptors;
+rewritten or capped content receives no fabricated canonical identity. The public stock
+source preparer independently certifies values, group boundaries, and order before a
+real canonical kept anchor is selected. The view expires when accepted state or its
+source changes. Session/checkpoint formats are unchanged. Existing retry-signature
+handling remains in `projection.ts`.
 
 `live_context_annotate` records source-backed `pin`, `continuity`, or `archive` annotations.
 Exact public session entry identity and content hash are required; unsafe source mappings
@@ -247,6 +255,7 @@ with explicit truncation markers. See [how-it-works.md](how-it-works.md) for con
 | `src/index.ts` | Public lifecycle, transaction ownership, commands, tools, notices |
 | `src/context-document.ts` | Rendering, parsing, protection, role lowering, native normalization |
 | `src/projection.ts`, `src/state.ts` | Prefix checks, suffix rebasing, branch-local checkpoints |
+| `src/compaction-source.ts` | Read-only accepted compaction view and exact suffix provenance |
 | `src/continuity.ts` | Durable source annotations and bounded recall |
 | `src/snapshot-messages.ts` | Content-validated immutable snapshots and draft-owned cache lifetime |
 | `src/mirror-store.ts` | Private atomic snapshots, submission claims, temporary cleanup |

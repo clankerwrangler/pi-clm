@@ -1,4 +1,5 @@
 ----------------------------- MODULE ContextSafety -----------------------------
+\* Sources: src/index.ts, src/compaction-source.ts, src/state.ts
 EXTENDS Integers, FiniteSets
 CONSTANT MaxGeneration
 VARIABLES enabled, store, generation, revision, draft, submitted,
@@ -46,7 +47,11 @@ Compact == /\ cancelled' = (enabled /\ store)
 Invalidate == /\ revision' = revision + 1 /\ accepted' = FALSE
               /\ UNCHANGED <<enabled,store,generation,draft,submitted,pending,results,
                             durableOutputs,persistedRefs,mirror,acceptedFresh,cancelled>>
-Next == Invalidate \/ Refresh \/ Begin \/ Submit \/ Consume \/ Complete \/ SaveOutput \/ Persist \/ DeleteMirror \/ Toggle \/ Compact
+\* Preparation reads accepted state; unlike ordinary context it cannot Consume,
+\* Refresh, or Persist. Source/revision use fencing is covered by ActorCompaction
+\* in the host and implementation expiry tests.
+PrepareCompaction == UNCHANGED vars
+Next == PrepareCompaction \/ Invalidate \/ Refresh \/ Begin \/ Submit \/ Consume \/ Complete \/ SaveOutput \/ Persist \/ DeleteMirror \/ Toggle \/ Compact
 Spec == Init /\ [][Next]_vars
 FreshEdits == accepted => acceptedFresh
 ExecutionClosure == pending \cap results = {} /\ pending \cup results = {"call"}
