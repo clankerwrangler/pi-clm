@@ -60,16 +60,20 @@ raw messages are appended unchanged; projection edits never execute or replay to
 
 ## What runs without the model
 
-- **Overflow guard:** over budget, eligible old tool-result text is replaced with a note
-  linking to a full-text file. File-backed sessions store content-addressed files under
-  `<session-file>.clm-outputs/`, outside the disposable mirror. Ordinary file tools can
-  read them; the optional recall tool is not required. Failed saves keep the source text.
+- **Overflow guard:** over budget, eligible old tool results are replaced with a note
+  linking to a full-text file. The replacement covers the whole result content, including
+  any images; the text file contains only its text. File-backed sessions store
+  content-addressed files under `<session-file>.clm-outputs/`, outside the disposable
+  mirror. Ordinary file tools can
+  read them; the optional recall tool is not required. Failed saves keep the source result.
 - **Calibration:** provider-reported usage adjusts the character-based estimate.
 
 The default compaction policy pauses Pi's threshold compaction only while CLM is enabled,
 its mirror is available, and the guard enforces a budget. `/clm off` leaves every native
-compaction reason untouched. Manual `/compact` still summarizes raw history and resets
-the projection; `/clm-compact` asks the model to submit its own edit instead.
+compaction reason untouched. Manual `/compact` is not vetoed. Stock array-hook hosts
+summarize raw history; matching source-aware hosts can prepare from the accepted CLM
+view. Successful native compaction resets the projection. `/clm-compact` asks the model
+to submit its own edit instead.
 
 ## The panel
 

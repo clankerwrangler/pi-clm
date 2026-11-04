@@ -200,10 +200,11 @@ separate values. Reminders use configurable fractions and reserve. The guard lim
 `min(budget - reserve, window - 4096 - reserve)`. Observation caps keep a configurable
 head/tail of eligible output before overflow withholding.
 
-The guard only withholds eligible text results. It first saves complete text to a SHA-256
-content-addressed file and then replaces the result with a link. Existing matching files
-are validated and reused without writing a duplicate. New files are written privately,
-synced, and published without overwriting an existing hash path. Collisions, corruption,
+The guard withholds eligible tool results. It first saves their text to a SHA-256
+content-addressed file and then replaces the whole result content with a link. Attached
+images are absent from that effective result; the canonical original remains archived.
+Existing matching files are validated and reused without writing a duplicate. New files
+are written privately, synced, and published without overwriting an existing hash path. Collisions, corruption,
 symlinks, and storage failures keep the source visible rather than produce a broken link.
 
 For file-backed sessions the directory is `<session-file>.clm-outputs/`; in-memory

@@ -6,12 +6,22 @@ ordinary file tools. Accepted edits change the next request,
 not the canonical session history.
 
 This independent fork of [lolipopshock/pi-clm](https://github.com/lolipopshock/pi-clm)
-starts from upstream 1.0.0 (`b84a9d7`) and adds asynchronous-safe submissions,
-durable overflow files, and Pi 0.99.1 API support. Default CLM mode retains upstream
+starts from upstream 1.0.0 (`b84a9d7`). Default CLM mode retains upstream
 editing, deletion, reordering, and whole-context summary replacement.
-The upstream MIT license and history are retained. The project implements ideas from
+The upstream MIT license, copyright notice for Emanuel Casco, and history are retained.
+The project implements ideas from
 [Context Language Models](https://arxiv.org/pdf/2609.37725) and its
 [research codebase](https://github.com/facebookresearch/context-language-models).
+
+## Fork additions
+
+- Transactional edit acceptance at request boundaries and final settlement, with explicit in-flight call checks.
+- Durable overflow text files that survive mirror cleanup and session reopening.
+- Source-aware snapshots and keyed archive recovery for hosts with the matching SDK APIs.
+- A read-only accepted context for native compaction, without consuming pending edits or notices.
+- Optional callable-only exposure for the existing annotation/recall helpers.
+
+The [architecture reference](docs/architecture.md) describes these mechanisms and their limits.
 
 ## Install
 
@@ -22,7 +32,11 @@ pi install git:github.com/clankerwrangler/pi-clm
 pi -e git:github.com/clankerwrangler/pi-clm
 ```
 
-Tested against Pi 0.99.1. This fork is distributed directly from GitHub.
+This fork is distributed as TypeScript source directly from GitHub; it has no separate
+build step or npm release. Pi loads the package's `index.ts` entry. Your Pi installation
+supplies the runtime SDK. The development lock pins Pi 0.99.1; source-aware host
+integration uses additional fork APIs. See [SDK compatibility](docs/development.md#sdk-compatibility)
+for the matched Pi 1.5.0 source baseline and fallback behavior.
 
 ## Quick start
 

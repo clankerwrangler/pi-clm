@@ -1,7 +1,6 @@
 # Development
 
-Use Node 22+ and pnpm through corepack. Development dependencies pin Pi 0.99.1;
-the loading Pi installation supplies the public SDK at runtime.
+Use Node 22+ and pnpm 10.2.1, as pinned by `package.json`. With Corepack installed:
 
 ```sh
 corepack pnpm install --frozen-lockfile --ignore-scripts
@@ -19,9 +18,26 @@ path requires a matching development SDK; default array compatibility remains
 covered against the pinned 0.99.1 dependency. Tests do not require
 provider credentials. Local mock lifecycle tests are not evidence of a live provider run.
 
-The keyed archive reader is feature-detected; Pi version `0.99.1` alone does not imply
-support. SDK source revision `9827d107` introduces it. Older SDKs retain their entry-source
-or full-array paths. To reproduce the public ownership probe against a source-aware SDK:
+## SDK compatibility
+
+The extension is loaded from TypeScript source; there is no compile or bundle step.
+`package.json` selects the root `index.ts`, which enables CLM editing policy. Loading
+`src/index.ts` directly uses the conservative policy instead.
+
+The host supplies the public Pi SDK at runtime. The development lock pins stock Pi
+0.99.1 for array-hook compatibility. Source-aware integration is also verified with the
+patched Pi 1.5.0 SDK at source revision `1723ab716f3856d3e07a8fa1e8a9aae36f6f6c58`.
+Use the SDK fork's `FORK.md` on its `sdk-1.5.0` branch to build a coherent local package set.
+The package's wildcard peer declarations do not guarantee every Pi release is compatible.
+
+The host must opt into source-backed sessions and call source-aware context/end
+dispatch to use that path. The keyed archive reader (`buildSessionEntryReader`) is
+feature-detected; older SDKs use `buildSessionEntrySource` or full-branch restoration.
+Read-only accepted compaction also requires source dispatch with `purpose: "compaction"`
+and the matching SDK's `prepareCompactionFromSource` integration. A Pi version number
+alone does not enable these features. Ordinary installations keep their array hooks.
+
+To run the public ownership probe against a source-aware SDK:
 
 ```sh
 node --expose-gc --import tsx spec/reader-recovery-probe.ts \
@@ -36,9 +52,8 @@ not count capture-internal detached copies or the active projection.
 ## Safety models
 
 [spec/README.md](../spec/README.md) documents the finite TLA+ models, checked before the
-corresponding implementation, and their limitations. Set `TLA_TOOLS_JAR` to a local TLA+ tools jar. Current receipts use TLC
-2026.09.04.170753; the headerless-replacement update also passes with TLC 2.19
-(2024-08-08). No model checker is downloaded by tests.
+corresponding implementation, and their limitations. Set `TLA_TOOLS_JAR` to a local
+TLA+ tools jar. No model checker is downloaded by tests.
 
 ## Try a checkout
 
