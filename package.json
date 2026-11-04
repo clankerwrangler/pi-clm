@@ -10,7 +10,7 @@
   },
   "packageManager": "pnpm@10.2.1",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "keywords": [
     "pi-package",
@@ -48,10 +48,10 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.99.1",
-    "@earendil-works/pi-ai": "0.99.1",
-    "@earendil-works/pi-coding-agent": "0.99.1",
-    "@earendil-works/pi-tui": "0.99.1",
+    "@earendil-works/pi-agent-core": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-agent-core-1.5.0-cfec224f2506.tgz",
+    "@earendil-works/pi-ai": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-ai-1.5.0-b3306506b8b4.tgz",
+    "@earendil-works/pi-coding-agent": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-coding-agent-1.5.0-39183a467a36.tgz",
+    "@earendil-works/pi-tui": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-tui-1.5.0-d66301617820.tgz",
     "@types/node": "22.19.15",
     "tsx": "4.21.0",
     "typebox": "1.1.12",
@@ -61,5 +61,20 @@
     "type": "git",
     "url": "git+https://github.com/clankerwrangler/pi-clm.git"
   },
-  "private": true
+  "private": true,
+  "pnpm": {
+    "overrides": {
+      "@earendil-works/chord": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-chord-1.5.0-b3ac1f9b7bb1.tgz",
+      "@earendil-works/pi-agent-core": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-agent-core-1.5.0-cfec224f2506.tgz",
+      "@earendil-works/pi-ai": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-ai-1.5.0-b3306506b8b4.tgz",
+      "@earendil-works/pi-codemode": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-codemode-1.5.0-7bcd7c838592.tgz",
+      "@earendil-works/pi-coding-agent": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-coding-agent-1.5.0-39183a467a36.tgz",
+      "@earendil-works/pi-durable": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-durable-1.5.0-55763db4817b.tgz",
+      "@earendil-works/pi-env": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-env-1.5.0-d5c0bdf7b3d7.tgz",
+      "@earendil-works/pi-mcp": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-mcp-1.5.0-b078504252e0.tgz",
+      "@earendil-works/pi-schema": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-schema-1.5.0-73543af28768.tgz",
+      "@earendil-works/pi-telemetry": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-telemetry-1.5.0-03c89c4d45b4.tgz",
+      "@earendil-works/pi-tui": "https://github.com/clankerwrangler/pi/releases/download/sdk-v1.5.0-9172355e/earendil-works-pi-tui-1.5.0-d66301617820.tgz"
+    }
+  }
 }

@@ -5,8 +5,9 @@
 Pi's append-only session is the source of truth. The extension stores branch-local
 projection checkpoints and annotations as public custom session entries; it does not
 rewrite raw messages or maintain a second history database. The mirror is a disposable
-view, not authoritative execution state. Integration uses public Pi SDK surfaces. Stock 0.99.1 retains its array hooks; the
-opt-in source path requires the SDK source-mode context/end dispatch.
+view, not authoritative execution state. Integration uses public Pi SDK surfaces.
+Ordinary hosts use array hooks; the opt-in source path requires the SDK source-mode
+context/end dispatch. Both paths are tested against the matched development SDK.
 
 Three representations stay distinct:
 

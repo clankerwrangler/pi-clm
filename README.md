@@ -34,9 +34,9 @@ pi -e git:github.com/clankerwrangler/pi-clm
 
 This fork is distributed as TypeScript source directly from GitHub; it has no separate
 build step or npm release. Pi loads the package's `index.ts` entry. Your Pi installation
-supplies the runtime SDK. The development lock pins Pi 0.99.1; source-aware host
-integration uses additional fork APIs. See [SDK compatibility](docs/development.md#sdk-compatibility)
-for the matched Pi 1.5.0 source baseline and fallback behavior.
+supplies the runtime SDK. Development uses a pinned, patched Pi 1.5.0 package set
+from the public SDK fork. See [SDK compatibility](docs/development.md#sdk-compatibility)
+for the matched baseline, source-aware integration, and ordinary array-hook fallback.
 
 ## Quick start
 

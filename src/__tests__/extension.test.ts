@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
+import { describe, test, type TestContext } from "node:test";
 import { mkdtemp, readFile, rm, writeFile, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createEventBus, ExtensionRunner, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	createEventBus, createExtensionRuntime, ExtensionRunner, ModelRegistry, ModelRuntime,
+	type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 
 import { digestMessages } from "../context-document.ts";
 import { LIVE_CONTEXT_ANNOTATION, sourceContentHash } from "../continuity.ts";
@@ -130,6 +133,25 @@ function createHarness(initialBranch: any[] = []): Harness {
 			usagePercent = percent;
 		},
 	};
+}
+
+/** Keep dispatch on a real SDK runner; only the extension context is a fixture. */
+async function createSdkRunner(harness: Harness, t: TestContext): Promise<ExtensionRunner> {
+	const directory = await mkdtemp(join(tmpdir(), "clm-dispatch-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const modelRuntime = await ModelRuntime.create({
+		authPath: join(directory, "auth.json"), modelsPath: null,
+		modelsStorePath: join(directory, "models-cache.json"), refreshOnCreate: false, allowModelNetwork: false,
+	});
+	const path = "<inline:clm-test>";
+	const runner = new ExtensionRunner([{
+		path, resolvedPath: path, sourceInfo: { path, source: "inline", scope: "temporary", origin: "top-level" },
+		handlers: harness.handlers, tools: new Map(), commands: new Map(), flags: new Map(),
+		shortcuts: new Map(), messageRenderers: new Map(),
+	}], createExtensionRuntime(), directory, harness.ctx.sessionManager, new ModelRegistry(modelRuntime));
+	t.mock.method(runner, "createContext", () => harness.ctx);
+	runner.onError((error) => { throw new Error(error.error); });
+	return runner;
 }
 
 async function emit(harness: Harness, name: string, event: any): Promise<any[]> {
@@ -2294,18 +2316,17 @@ for (const pruned of [true, false]) test(`stock context dispatch shares ${pruned
 		if (value?.snapshotProbe === true) payloadCopies++;
 		return clone(value, options);
 	});
-	const runner = { createContext: () => harness.ctx, extensions: [{ path: "synthetic-clm", handlers: harness.handlers }],
-		emitError: (error: any) => { throw new Error(error.error); } } as unknown as ExtensionRunner;
+	const runner = await createSdkRunner(harness, t);
 	try {
-		await ExtensionRunner.prototype.emitContext.call(runner, raw);
+		await runner.emitContext(raw);
 		const oldest = await readFile(path, "utf8");
 		for (let request = 1; request < 16; request++) {
-			const output = await ExtensionRunner.prototype.emitContext.call(runner, raw);
+			const output = await runner.emitContext(raw);
 			assert.deepEqual((output[0] as LiveContextMessage).content, pruned ? "Retained summary" : raw[0].content);
 		}
 		assert.equal(payloadCopies, 1, "unchanged raw content must not be copied for each fresh SDK request");
 		await submit(path, `${oldest.split("\n")[0]}\nA new summary from the oldest valid draft.`);
-		await ExtensionRunner.prototype.emitContext.call(runner, raw);
+		await runner.emitContext(raw);
 		assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1).data.revision, pruned ? 2 : 1);
 		assert.equal(raw[0].content[0].text, "synthetic payload ".repeat(256));
 	} finally {
