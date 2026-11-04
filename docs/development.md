@@ -27,7 +27,8 @@ The extension is loaded from TypeScript source; there is no compile or bundle st
 The host supplies the public Pi SDK at runtime. The development lock pins stock Pi
 0.99.1 for array-hook compatibility. Source-aware integration is also verified with the
 patched Pi 1.5.0 SDK at source revision `1723ab716f3856d3e07a8fa1e8a9aae36f6f6c58`.
-Use the SDK fork's `FORK.md` on its `sdk-1.5.0` branch to build a coherent local package set.
+Use the [SDK fork build guide](https://github.com/clankerwrangler/pi/blob/sdk-1.5.0/FORK.md)
+on `clankerwrangler/pi` branch `sdk-1.5.0` to build a coherent local package set.
 The package's wildcard peer declarations do not guarantee every Pi release is compatible.
 
 The host must opt into source-backed sessions and call source-aware context/end
